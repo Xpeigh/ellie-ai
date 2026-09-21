@@ -141,8 +141,12 @@ DISPATCH = {
 
 def call_tool(name, arguments):
     """Executes a tool call and returns a JSON-serializable result. Never
-    raises -- an unknown tool name or bad arguments becomes a clear error
-    the model can relay to the user, not a crash."""
+    raises -- an unknown tool name, bad arguments, or an unexpected failure
+    inside the tool itself all become a clear error dict the model can
+    relay to the user, not a crash of the whole chat loop. query_functions
+    already turns "database isn't set up yet" into a normal {"found":
+    False} result; the broad except below is a last-resort backstop for
+    anything that isn't that (a real bug), not the primary handling for it."""
     func = DISPATCH.get(name)
     if func is None:
         return {"error": f"unknown tool '{name}'"}
@@ -150,6 +154,8 @@ def call_tool(name, arguments):
         return func(**arguments)
     except TypeError as e:
         return {"error": f"bad arguments for '{name}': {e}"}
+    except Exception as e:
+        return {"error": f"'{name}' failed unexpectedly: {e}"}
 
 
 def ask_ellie(user_message, history):

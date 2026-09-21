@@ -10,6 +10,7 @@ hand; Coriolis (coriolis_blueprints) is the fallback for anything the
 sheet doesn't have filled in yet. See blueprint_mapping.py for why these
 two don't share a join key directly.
 """
+import functools
 import json
 import math
 import sqlite3
@@ -26,6 +27,24 @@ def _connect():
     return conn
 
 
+def _needs_setup(func):
+    """If the table(s) a function needs don't exist yet -- setup.py hasn't
+    been run, or only some of its steps have -- SQLite raises
+    OperationalError. Without this, that would crash ellie_chat's tool-call
+    loop instead of letting the model tell the commander plainly that the
+    data isn't there yet. Any OTHER OperationalError (a real bug) still
+    raises rather than being swallowed here."""
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except sqlite3.OperationalError as e:
+            if "no such table" not in str(e):
+                raise
+            return {"found": False, "reason": f"Ellie's database isn't fully set up yet ({e}). Run `python setup.py`."}
+    return wrapper
+
+
 def _materials_to_dict(materials_json):
     """Normalizes both storage shapes (Excel's list-of-{qty,item} and
     Coriolis's dict-of-{name:qty}) into one {name: qty} dict."""
@@ -35,6 +54,7 @@ def _materials_to_dict(materials_json):
     return {m["item"]: m["qty"] for m in materials if m.get("item")}
 
 
+@_needs_setup
 def get_blueprint(module_name: str, upgrade_name: str, grade: int) -> dict:
     """Materials required for a specific module/upgrade/grade blueprint.
     Checks the Excel sheet first (most specific), falls back to Coriolis's
@@ -84,6 +104,7 @@ def get_blueprint(module_name: str, upgrade_name: str, grade: int) -> dict:
     return {"found": False, "module": module_name, "upgrade": upgrade_name, "grade": grade}
 
 
+@_needs_setup
 def get_experimental_effect(module_name: str, effect_name: str) -> dict:
     """Materials required for an experimental effect (ungraded -- single
     cost, no grade 1-5). Checks Excel's ungraded_costs first, falls back
@@ -135,13 +156,17 @@ def _material_key(name):
     return name.lower().replace(" ", "").replace("-", "")
 
 
+@_needs_setup
 def missing_materials(module_name: str, upgrade_name: str, grade: int) -> dict:
     """Diffs a blueprint's requirement against what's actually on hand
     right now (materials_inventory, kept current by journal_watcher.py)."""
     grade = int(grade)
     blueprint = get_blueprint(module_name, upgrade_name, grade)
     if not blueprint["found"]:
-        return {"found": False, "module": module_name, "upgrade": upgrade_name, "grade": grade}
+        result = {"found": False, "module": module_name, "upgrade": upgrade_name, "grade": grade}
+        if "reason" in blueprint:  # e.g. the database isn't set up -- don't let that read as "no such blueprint"
+            result["reason"] = blueprint["reason"]
+        return result
 
     conn = _connect()
     missing, have_enough = {}, True
@@ -168,6 +193,7 @@ def missing_materials(module_name: str, upgrade_name: str, grade: int) -> dict:
     }
 
 
+@_needs_setup
 def get_engineer(name: str) -> dict:
     """An engineer's location, prerequisites, and what they unlock."""
     conn = _connect()
@@ -227,7 +253,22 @@ def player_state() -> dict:
     as per-category COUNTS, not a full itemized list -- Ben's own testing
     showed a model paraphrasing a ~150-item list into "selected examples"
     and quietly getting several exact numbers wrong in the process. Use
-    get_material_count() for a specific material's exact figure instead."""
+    get_material_count() for a specific material's exact figure instead.
+
+    Unlike the other functions here this has no "found" key on success, so
+    it can't share the @_needs_setup decorator -- a missing table gets its
+    own try/except below, returning the same {status, materials_summary}
+    shape (both empty) plus an "error" key, rather than a shape the caller
+    isn't expecting."""
+    try:
+        return _player_state()
+    except sqlite3.OperationalError as e:
+        if "no such table" not in str(e):
+            raise
+        return {"status": {}, "materials_summary": {}, "error": f"Ellie's database isn't fully set up yet ({e}). Run `python setup.py`."}
+
+
+def _player_state() -> dict:
     conn = _connect()
     status_row = conn.execute("SELECT * FROM commander_status WHERE id = 1").fetchone()
     status = dict(status_row) if status_row else {}
@@ -254,6 +295,7 @@ def player_state() -> dict:
     return {"status": status, "materials_summary": materials_summary}
 
 
+@_needs_setup
 def get_material_count(material_name: str) -> dict:
     """Exact on-hand count for ONE specific material, by exact name. Use
     this for "how much X do I have" instead of trying to read it off
@@ -269,6 +311,7 @@ def get_material_count(material_name: str) -> dict:
     return {"found": True, "material_name": row["display_name"], "category": row["category"], "count": row["count"]}
 
 
+@_needs_setup
 def distance_to_system(system_name: str) -> dict:
     """Straight-line distance (light years) from the commander's CURRENT
     system to a named system. The origin's coordinates come from the

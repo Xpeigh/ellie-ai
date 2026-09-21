@@ -12,6 +12,8 @@ coriolis-data/
 archive/
 plan.md
 .claude/
+.impeccable/
+skills-lock.json
 
 # Python
 __pycache__/
