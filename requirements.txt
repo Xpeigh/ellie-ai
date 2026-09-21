@@ -1,0 +1,4 @@
+ollama
+openpyxl
+ijson
+requests

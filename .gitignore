@@ -1,0 +1,20 @@
+# Generated / personal data -- rebuilt locally by the ingest scripts and the journal watcher
+*.db
+*.db-wal
+*.db-shm
+edsm_dumps/
+*.xlsx
+
+# Cloned separately (see README) -- not part of this repo
+coriolis-data/
+
+# Local-only
+archive/
+plan.md
+.claude/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
