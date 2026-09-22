@@ -75,6 +75,24 @@ def build_schema(conn):
             engineer_name TEXT PRIMARY KEY, rank_stage TEXT, rank_value INTEGER,
             last_updated TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS current_loadout (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            ship_key TEXT, ship_id INTEGER, ship_name TEXT,
+            max_jump_range REAL, unladen_mass REAL, cargo_capacity REAL,
+            fuel_main REAL, fuel_reserve REAL,
+            hull_value INTEGER, modules_value INTEGER, rebuy INTEGER,
+            last_updated TEXT
+        );
+        INSERT OR IGNORE INTO current_loadout (id) VALUES (1);
+
+        CREATE TABLE IF NOT EXISTS current_loadout_modules (
+            slot TEXT PRIMARY KEY,
+            item TEXT, is_on INTEGER, priority INTEGER, health REAL, value INTEGER,
+            engineering_blueprint TEXT, engineering_level INTEGER, engineering_quality REAL,
+            engineering_experimental TEXT, engineering_modifiers_json TEXT,
+            last_updated TEXT
+        );
         """
     )
     # CREATE TABLE IF NOT EXISTS won't add columns to a table an earlier
@@ -123,6 +141,42 @@ def reset_materials(conn, materials_event):
                     now,
                 ),
             )
+    conn.commit()
+
+
+def set_loadout(conn, event):
+    """Loadout is a full snapshot of the current ship, fired on launch, on
+    any module change, and on request -- replace both tables wholesale,
+    the same convention reset_materials() already uses for Materials."""
+    now = _now_iso()
+    fuel = event.get("FuelCapacity") or {}
+    conn.execute(
+        "UPDATE current_loadout SET ship_key=?, ship_id=?, ship_name=?, max_jump_range=?, "
+        "unladen_mass=?, cargo_capacity=?, fuel_main=?, fuel_reserve=?, hull_value=?, "
+        "modules_value=?, rebuy=?, last_updated=? WHERE id = 1",
+        (
+            event.get("Ship"), event.get("ShipID"), event.get("ShipName"),
+            event.get("MaxJumpRange"), event.get("UnladenMass"), event.get("CargoCapacity"),
+            fuel.get("Main"), fuel.get("Reserve"),
+            event.get("HullValue"), event.get("ModulesValue"), event.get("Rebuy"),
+            now,
+        ),
+    )
+
+    conn.execute("DELETE FROM current_loadout_modules")
+    for m in event.get("Modules", []):
+        eng = m.get("Engineering") or {}
+        conn.execute(
+            "INSERT INTO current_loadout_modules VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                m.get("Slot"), m.get("Item"), int(bool(m.get("On"))), m.get("Priority"),
+                m.get("Health"), m.get("Value"),
+                eng.get("BlueprintName"), eng.get("Level"), eng.get("Quality"),
+                eng.get("ExperimentalEffect"),
+                json.dumps(eng["Modifiers"]) if "Modifiers" in eng else None,
+                now,
+            ),
+        )
     conn.commit()
 
 
@@ -246,6 +300,8 @@ def process_event(conn, event):
                 (name, eng.get("Progress"), eng.get("Rank"), now),
             )
         conn.commit()
+    elif etype == "Loadout":
+        set_loadout(conn, event)
 
 
 def replay_journal(conn, path):
