@@ -359,3 +359,72 @@ def distance_to_system(system_name: str) -> dict:
         "to": destination["name"],
         "distance_ly": round(distance, 2),
     }
+
+
+@_needs_setup
+def get_current_loadout() -> dict:
+    """The commander's real, current ship as captured from the journal's
+    own Loadout event -- ship, mass, jump range, and every fitted module
+    with its real engineering modifiers where present. Unlike a
+    hypothetical swap (simulate_module_swap), nothing here is computed;
+    it's exactly what the game itself already reported."""
+    conn = _connect()
+    status = conn.execute("SELECT * FROM current_loadout WHERE id = 1").fetchone()
+    if not status or not status["ship_key"]:
+        conn.close()
+        return {"found": False, "reason": "no Loadout event captured yet -- journal_watcher may not be running, or you haven't launched/undocked this session"}
+
+    modules = conn.execute(
+        "SELECT slot, item, is_on, priority, health, engineering_blueprint, "
+        "engineering_level, engineering_quality, engineering_experimental, "
+        "engineering_modifiers_json FROM current_loadout_modules ORDER BY slot"
+    ).fetchall()
+    conn.close()
+
+    module_list = []
+    for m in modules:
+        entry = {
+            "slot": m["slot"], "item": m["item"], "on": bool(m["is_on"]),
+            "health": m["health"],
+        }
+        if m["engineering_blueprint"]:
+            entry["engineering"] = {
+                "blueprint": m["engineering_blueprint"],
+                "level": m["engineering_level"],
+                "quality": m["engineering_quality"],
+                "experimental_effect": m["engineering_experimental"],
+                "modifiers": json.loads(m["engineering_modifiers_json"]) if m["engineering_modifiers_json"] else [],
+            }
+        module_list.append(entry)
+
+    return {
+        "found": True,
+        "ship": status["ship_key"],
+        "max_jump_range": status["max_jump_range"],
+        "unladen_mass": status["unladen_mass"],
+        "cargo_capacity": status["cargo_capacity"],
+        "fuel_main": status["fuel_main"],
+        "fuel_reserve": status["fuel_reserve"],
+        "modules": module_list,
+    }
+
+
+@_needs_setup
+def get_ship_info(ship_name: str) -> dict:
+    """Base (unengineered) stats and slot layout for a named ship, from
+    coriolis-data via ingest_ship_modules.py. Matches by display name
+    (e.g. "Python") case-insensitively."""
+    conn = _connect()
+    row = conn.execute(
+        "SELECT * FROM ship_stats WHERE lower(name) = lower(?)", (ship_name,)
+    ).fetchone()
+    conn.close()
+    if not row:
+        return {"found": False, "ship_name": ship_name}
+    return {
+        "found": True,
+        "name": row["name"],
+        "manufacturer": row["manufacturer"],
+        "hull_mass": row["hull_mass"],
+        "slots": json.loads(row["slots_json"]),
+    }
