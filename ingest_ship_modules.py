@@ -72,8 +72,35 @@ def build_ships(conn, repo_path):
     return count
 
 
+def _is_better_entry(candidate, existing):
+    """Compare two candidate entries for a symbol, return True if candidate is better.
+
+    Precedence:
+    1. Prefer non-preEngineered over preEngineered
+    2. Prefer non-null mass over null mass
+    3. Otherwise keep existing (first encountered)
+    """
+    candidate_has_pre = "preEngineered" in candidate
+    existing_has_pre = "preEngineered" in existing
+
+    # Rule 1: prefer non-preEngineered
+    if candidate_has_pre != existing_has_pre:
+        return not candidate_has_pre  # True if candidate is non-preEngineered
+
+    # Rule 2: prefer non-null mass
+    candidate_mass = candidate.get("mass")
+    existing_mass = existing.get("mass")
+    if (candidate_mass is not None) != (existing_mass is not None):
+        return candidate_mass is not None
+
+    # Rule 3: keep existing (first encountered)
+    return False
+
+
 def build_modules(conn, repo_path):
-    count = 0
+    # Collect all candidate entries per symbol, selecting the best per our precedence rules
+    best_by_symbol = {}
+
     for subdir in MODULE_DIRS:
         for path in sorted((Path(repo_path) / "modules" / subdir).glob("*.json")):
             data = json.load(open(path, encoding="utf-8"))
@@ -84,23 +111,33 @@ def build_modules(conn, repo_path):
                     symbol = m.get("symbol")
                     if not symbol:
                         continue
-                    extra = {k: v for k, v in m.items() if k not in _CORE_FIELDS}
-                    conn.execute(
-                        "INSERT OR REPLACE INTO module_stats VALUES (?,?,?,?,?,?,?,?,?,?)",
-                        (
-                            symbol.lower(),
-                            m.get("id"),
-                            m.get("edID"),
-                            m.get("grp"),
-                            m.get("class"),
-                            m.get("rating"),
-                            m.get("mass"),
-                            m.get("power"),
-                            m.get("cost"),
-                            json.dumps(extra),
-                        ),
-                    )
-                    count += 1
+                    lower_symbol = symbol.lower()
+
+                    # Compare with existing best entry for this symbol
+                    if lower_symbol not in best_by_symbol:
+                        best_by_symbol[lower_symbol] = m
+                    elif _is_better_entry(m, best_by_symbol[lower_symbol]):
+                        best_by_symbol[lower_symbol] = m
+
+    # Insert the best entry for each symbol
+    count = len(best_by_symbol)
+    for symbol, m in best_by_symbol.items():
+        extra = {k: v for k, v in m.items() if k not in _CORE_FIELDS}
+        conn.execute(
+            "INSERT OR REPLACE INTO module_stats VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (
+                symbol,
+                m.get("id"),
+                m.get("edID"),
+                m.get("grp"),
+                m.get("class"),
+                m.get("rating"),
+                m.get("mass"),
+                m.get("power"),
+                m.get("cost"),
+                json.dumps(extra),
+            ),
+        )
     conn.commit()
     return count
 

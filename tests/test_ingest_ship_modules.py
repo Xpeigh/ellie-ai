@@ -65,6 +65,17 @@ def test_every_real_fitted_module_resolves(tmp_path):
         if row is None:
             missing.append(symbol)
     assert not missing, f"real fitted modules missing from module_stats: {missing}"
+
+    # Regression: int_fueltank_size7_class3 appears in both standard/ and internal/
+    # with different mass values (0 vs None). Must resolve to the correct base-game
+    # value (mass=0 from standard fuel_tank.json, not mass=None from internal).
+    fuel_tank = conn.execute(
+        "SELECT mass FROM module_stats WHERE symbol = ?",
+        ("int_fueltank_size7_class3",),
+    ).fetchone()
+    assert fuel_tank is not None, "int_fueltank_size7_class3 missing"
+    assert fuel_tank[0] == 0, f"int_fueltank_size7_class3 mass should be 0, got {fuel_tank[0]}"
+
     conn.close()
 
 
