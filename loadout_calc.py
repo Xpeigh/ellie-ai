@@ -12,12 +12,18 @@ a real Loadout event's MaxJumpRange the same way.
 """
 
 
-def compute_jump_range(unladen_mass, fsd_optmass, fsd_maxfuel, fsd_fuelmul, fsd_fuelpower):
+def compute_jump_range(unladen_mass, fsd_optmass, fsd_maxfuel, fsd_fuelmul, fsd_fuelpower, booster_bonus=0.0):
     """Max single-jump range in ly. total_mass is the ship's unladen mass
     plus exactly one jump's worth of fuel (fsd_maxfuel) -- that combination
-    is what "max jump range" means in-game, verified above."""
+    is what "max jump range" means in-game, verified above.
+
+    booster_bonus: flat ly addition from Guardian FSD Booster if fitted (default 0.0).
+    The booster contribution is applied as a post-computation flat addition based on
+    coriolis-data's jumpboost field and standard community understanding of the module.
+    Unlike the base formula, this has NOT been independently cross-verified against a
+    real Loadout event from an actual boosted ship."""
     total_mass = unladen_mass + fsd_maxfuel
-    return ((fsd_maxfuel / fsd_fuelmul) ** (1 / fsd_fuelpower)) * fsd_optmass / total_mass
+    return ((fsd_maxfuel / fsd_fuelmul) ** (1 / fsd_fuelpower)) * fsd_optmass / total_mass + booster_bonus
 
 
 def apply_blueprint_delta(base_value, pct_range):

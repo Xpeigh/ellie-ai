@@ -52,3 +52,13 @@ def test_apply_blueprint_delta_real_range():
     assert abs(lo - 6771.5) < 0.01
     assert abs(hi - 7238.5) < 0.01
     assert lo < hi
+
+
+def test_compute_jump_range_with_guardian_fsd_booster():
+    # Guardian FSD Booster (e.g. class 2) adds a flat ly bonus to jump range.
+    # The booster contribution must be additive post-computation.
+    without_booster = compute_jump_range(1286.300049, 7333.768066, 6.8, 0.011, 2.5025)
+    with_booster = compute_jump_range(
+        1286.300049, 7333.768066, 6.8, 0.011, 2.5025, booster_bonus=6
+    )
+    assert with_booster - without_booster == 6
