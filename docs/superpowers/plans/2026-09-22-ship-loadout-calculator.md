@@ -1003,6 +1003,33 @@ def test_blueprint_effect_this_code_cant_apply_is_reported_not_dropped(tmp_path)
     assert set(result["unmodeled_blueprint_effects"]) == {"integrity", "thermload"}
 
 
+def test_guardian_fsd_booster_adds_flat_bonus_to_jump_range(tmp_path):
+    """A fitted Guardian FSD Booster contributes a flat additive bonus to
+    the reported jump range -- verified against real coriolis-data (class
+    2 -> jumpboost 6 ly). Swapping something OTHER than the FSD or the
+    booster must still pick up the currently-fitted booster's
+    contribution when computing the resulting range."""
+    path = _db(tmp_path)
+    without = qf.simulate_module_swap(module_group="life support", module_class=5, module_rating="D")
+
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "INSERT INTO current_loadout_modules VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("Slot08_Size4", "int_guardianfsdbooster_size2", 1, 1, 1.0, None,
+         None, None, None, None, None, "2026-09-19T16:11:31Z"),
+    )
+    conn.commit()
+    conn.close()
+    with_booster = qf.simulate_module_swap(module_group="life support", module_class=5, module_rating="D")
+
+    assert without["found"] is True and with_booster["found"] is True
+    # no blueprint on this swap, so both sides collapse to a plain float
+    # (see _min_max_or_single) rather than a {"min","max"} dict
+    assert isinstance(without["new_jump_range"], (int, float))
+    assert isinstance(with_booster["new_jump_range"], (int, float))
+    assert abs((with_booster["new_jump_range"] - without["new_jump_range"]) - 6) < 0.01
+
+
 def test_nothing_fitted_of_that_group_fails_cleanly_not_a_crash(tmp_path):
     """Review Focus #2: nothing of this group is currently fitted (no row
     in current_loadout_modules at all) -- Phase A doesn't guess which
@@ -1047,6 +1074,7 @@ MODULE_GROUP_TO_GRP = {
     "hull reinforcement": "hr", "module reinforcement": "mrp",
     "cargo rack": "cr", "large cargo rack": "crl",
     "fuel scoop": "fs", "docking computer": "dc",
+    "guardian fsd booster": "gfsb",
     "auto field-maintenance unit": "am", "afmu": "am",
     "refinery": "rf", "fighter hangar": "fh",
     "beam laser": "bl", "burst laser": "ul", "pulse laser": "pl",
@@ -1214,13 +1242,28 @@ def simulate_module_swap(module_group: str, module_class: int, module_rating: st
                 if mod["Label"] == "FSDOptimalMass":
                     optmass_min = optmass_max = mod["Value"]
 
+    # Guardian FSD Booster: a flat additive jump-range bonus (loadout_calc.compute_jump_range's
+    # booster_bonus parameter -- see that function's own docstring for the honest caveat that
+    # this addition, unlike the base formula, isn't cross-verified against a real boosted ship).
+    # Resolved the same way as the effective FSD stats above: if the booster ITSELF is the slot
+    # being swapped, use the new module's jumpboost; otherwise use whatever booster (if any) is
+    # currently fitted. No booster fitted and none being added -> 0.0, unchanged behavior.
+    if grp == "gfsb":
+        booster_bonus = new_module_extra_get(new_module, "jumpboost") or 0.0
+    else:
+        booster_row = conn.execute(
+            "SELECT ms.extra_json FROM current_loadout_modules clm "
+            "JOIN module_stats ms ON ms.symbol = lower(clm.item) WHERE ms.grp = 'gfsb'"
+        ).fetchone()
+        booster_bonus = (new_module_extra_get(booster_row, "jumpboost") if booster_row else None) or 0.0
+
     conn.close()
 
     if None in (fsd_maxfuel, fsd_fuelmul, fsd_fuelpower, optmass_min):
         new_range_min = new_range_max = None
     else:
-        new_range_min = compute_jump_range(new_unladen_max, optmass_min, fsd_maxfuel, fsd_fuelmul, fsd_fuelpower)
-        new_range_max = compute_jump_range(new_unladen_min, optmass_max, fsd_maxfuel, fsd_fuelmul, fsd_fuelpower)
+        new_range_min = compute_jump_range(new_unladen_max, optmass_min, fsd_maxfuel, fsd_fuelmul, fsd_fuelpower, booster_bonus)
+        new_range_max = compute_jump_range(new_unladen_min, optmass_max, fsd_maxfuel, fsd_fuelmul, fsd_fuelpower, booster_bonus)
 
     return {
         "found": True,
@@ -1261,7 +1304,7 @@ def _min_max_or_single(lo, hi, ndigits=2):
 
 Run: `pytest tests/test_simulate_module_swap.py -v`
 
-This function is intricate enough that the first run will very likely surface at least one real bug (a wrong join, a `None` not handled) — that's expected and is exactly what this test suite is for. Fix issues in `simulate_module_swap` (not the tests, which encode real verified facts) until all 7 tests pass. Re-run after each fix.
+This function is intricate enough that the first run will very likely surface at least one real bug (a wrong join, a `None` not handled) — that's expected and is exactly what this test suite is for. Fix issues in `simulate_module_swap` (not the tests, which encode real verified facts) until all 8 tests pass. Re-run after each fix.
 
 - [ ] **Step 5: Run the full test suite**
 
