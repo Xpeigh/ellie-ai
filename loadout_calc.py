@@ -27,9 +27,17 @@ def compute_jump_range(unladen_mass, fsd_optmass, fsd_maxfuel, fsd_fuelmul, fsd_
 
 
 def apply_blueprint_delta(base_value, pct_range):
-    """pct_range is Coriolis's own [min_pct, max_pct] (e.g. [0.45, 0.55] for
+    """pct_range is Coriolis's own two-element range (e.g. [0.45, 0.55] for
     a +45% to +55% roll-dependent change). Returns (min_value, max_value) --
     equal when the blueprint grade is deterministic for this stat
-    (min_pct == max_pct), never a fabricated spread (Review Focus #5)."""
-    min_pct, max_pct = pct_range
-    return (base_value * (1 + min_pct), base_value * (1 + max_pct))
+    (the two percentages are equal), never a fabricated spread (Review
+    Focus #5).
+
+    Coriolis does NOT always store the pair as [smaller, larger]: 155 real
+    feature ranges (verified against modifications/blueprints.json) are
+    stored larger-first for a stat a blueprint *lowers* -- e.g. Lightweight
+    grade 1's mass is [0, -0.45]. Sorting the two computed values (rather
+    than trusting the input order) is what actually guarantees min <= max."""
+    pct_a, pct_b = pct_range
+    value_a, value_b = base_value * (1 + pct_a), base_value * (1 + pct_b)
+    return (min(value_a, value_b), max(value_a, value_b))

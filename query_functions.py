@@ -13,6 +13,7 @@ two don't share a join key directly.
 import functools
 import json
 import math
+import re
 import sqlite3
 from pathlib import Path
 
@@ -46,16 +47,77 @@ MODULE_GROUP_TO_GRP = {
 }
 
 # The 7 standard modules are always exactly one per ship, with a FIXED
-# journal slot name regardless of ship type or what's currently fitted --
-# unlike optional-internal/hardpoint slots (see _resolve_target_slot's
-# docstring and the plan's Review Focus #2 scope note, which is about
-# "ordinary (non-reserved) slots" specifically), there's no size-to-name
-# ambiguity to resolve for these. Names verified against the journal
-# manual (elite-journal.readthedocs.io) and real Loadout events.
+# journal slot name regardless of ship type -- unlike optional-internal/
+# hardpoint slots, there's no size-to-name ambiguity for these. Used only
+# as a fallback when nothing of that group is currently fitted (R1) --
+# the fitted-module lookup always runs first, so a ship with an internal
+# fuel tank alongside its standard tank still gets a real ambiguity error
+# instead of always landing on the standard slot. Names verified against
+# the journal manual (elite-journal.readthedocs.io) and real Loadout events.
 STANDARD_SLOT_NAMES = {
     "pp": "PowerPlant", "t": "MainEngines", "fsd": "FrameShiftDrive",
     "ls": "LifeSupport", "pd": "PowerDistributor", "s": "Radar", "ft": "FuelTank",
 }
+
+# Friendly display text for a standard grp, used only in "this slot only
+# takes a <X>" messages (R5). Same 7 groups as STANDARD_SLOT_NAMES.
+STANDARD_GRP_DISPLAY = {
+    "pp": "power plant", "t": "thrusters", "fsd": "frame shift drive",
+    "ls": "life support", "pd": "power distributor", "s": "sensors", "ft": "fuel tank",
+}
+
+# Order of ship_stats.slots_json["standard"], verified against every real
+# ship file in coriolis-data/ships/*.json.
+STANDARD_SLOTS_ORDER = ["pp", "t", "fsd", "ls", "pd", "s", "ft"]
+
+# grp -> the exact Coriolis `applies_to` token(s) (lowercased) a blueprint's
+# modulename list must contain for it to apply to that group. Replaces a
+# substring match against arbitrary text (that let "t" match inside
+# "shift" and "pp" match inside "support") with a whole-token comparison
+# against the real, complete set of applies_to values in
+# modifications/blueprints.json. A grp absent here has no Coriolis
+# blueprint coverage at all (ft, mrp, crl, dc, fh, gfsb) -- not an
+# oversight, there simply are no blueprints for it.
+GRP_TO_BLUEPRINT_CATEGORIES = {
+    "fsd": ["frame shift drive"], "pp": ["power plant"], "pd": ["power distributor"],
+    "t": ["thrusters"], "ls": ["life support"], "s": ["sensors"],
+    "sg": ["shield generator"], "bsg": ["shield generator"], "psg": ["shield generator"],
+    "scb": ["shield cell bank"], "sb": ["shield booster"], "hr": ["hull reinforcement"],
+    "cr": ["expanded capacity cargo rack"], "fs": ["fuel scoop"],
+    "am": ["auto field mainentance unit"],   # Coriolis's own spelling, verbatim
+    "rf": ["refinery"],
+    "bl": ["weapon"], "ul": ["weapon"], "pl": ["weapon"], "c": ["weapon"], "mc": ["weapon"],
+    "fc": ["weapon"], "rg": ["weapon"], "pa": ["weapon"], "nl": ["weapon"], "mr": ["weapon"], "tp": ["weapon"],
+    "ch": ["chaff launcher"], "hs": ["heat sink launcher"], "po": ["point defence"],
+}
+
+# journal current_loadout.ship_key -> ship_stats.ship_key, for the ships
+# where the journal's internal name doesn't match Coriolis's directly.
+# Each entry verified by reconstructing that ship's real UnladenMass
+# exactly from Coriolis data -- except federation_corvette, verified by
+# identity only (it's the only Corvette); Coriolis's mass for it is off
+# by 12 t, which this tool doesn't depend on.
+JOURNAL_SHIP_TO_CORIOLIS = {
+    "belugaliner": "beluga", "cobramkiii": "cobra_mk_iii", "cutter": "imperial_cutter",
+    "diamondbackxl": "diamondback_explorer", "empire_eagle": "imperial_eagle",
+    "federation_corvette": "federal_corvette", "ferdelance": "fer_de_lance",
+    "independant_trader": "keelback", "krait_light": "krait_phantom",
+    "lakonminer": "type_11_prospector", "smallcombat01_nx": "kestrel",
+    "type6": "type_6_transporter", "type7": "type_7_transport", "type8": "type_8_transport",
+    "type9": "type_9_heavy",
+}
+
+_OPTIONAL_INTERNAL_SLOT_RE = re.compile(r"^Slot\d+_Size(\d+)$", re.IGNORECASE)
+_HARDPOINT_SLOT_RE = re.compile(r"^(Tiny|Small|Medium|Large|Huge)(?:Mining)?Hardpoint\d+$", re.IGNORECASE)
+_HARDPOINT_MAX_CLASS = {"tiny": 0, "small": 1, "medium": 2, "large": 3, "huge": 4}
+
+# On-item name patterns that draw no power at all and are never in
+# module_stats (cosmetics/cockpits/armour are ship-cosmetic or
+# bulkhead-only, not real modules) -- checked before a module_stats
+# lookup so they're never mistaken for an unknown/unmodeled module.
+_ZERO_DRAW_SUFFIXES = ("_cockpit",)
+_ZERO_DRAW_PREFIXES = ("voicepack_", "paintjob_", "decal_", "nameplate_", "bobble_", "string_lights_")
+_ZERO_DRAW_SUBSTRINGS = ("_armour_", "_shipkit", "customisation_")
 
 
 def _connect():
@@ -478,20 +540,41 @@ def _module_group_to_grp(module_group):
     return None
 
 
+def _resolve_explicit_slot_casing(conn, explicit_slot):
+    """An explicit `slot` is matched case-insensitively (R5) -- against
+    what's actually fitted first (the ground truth for real slot names),
+    then against the 7 standard names, returning the REAL casing either
+    way. A slot that matches neither (e.g. a genuinely empty utility
+    mount nothing has ever been fitted to) is returned exactly as given;
+    there's nothing to correct it against."""
+    row = conn.execute(
+        "SELECT slot FROM current_loadout_modules WHERE lower(slot) = lower(?)", (explicit_slot,)
+    ).fetchone()
+    if row:
+        return row["slot"]
+    for name in STANDARD_SLOT_NAMES.values():
+        if name.lower() == explicit_slot.lower():
+            return name
+    return explicit_slot
+
+
 def _resolve_target_slot(conn, ship_key, grp, explicit_slot):
-    """Which slot a swap targets. A standard module (fsd/pp/t/ls/pd/s/ft)
-    always has exactly one fixed journal slot name, so that's resolved
-    directly. Anything else (optional internals, hardpoints, utility
-    mounts) is resolved from what's currently fitted, matched by module
-    group. When NOTHING of that group is fitted, there's no verified way
-    to map Coriolis's slot-size layout to the journal's own slot names
-    (see the plan's Review Focus #2 scope note) -- rather than guess,
-    this asks for an explicit slot, the same honest treatment bulkheads
-    already get."""
+    """Which slot a swap targets. An explicit slot always wins (casing
+    corrected against reality, R5). Otherwise: resolve from what's
+    CURRENTLY FITTED of that grp first (R1) -- this must run before the
+    standard-slot fallback below, because a grp like `ft` covers both the
+    one standard FuelTank slot AND any optional-internal fuel tanks, and
+    a ship with both fitted is genuinely ambiguous, not automatically the
+    standard slot. Only when NOTHING of that grp is fitted does a
+    standard module (fsd/pp/t/ls/pd/s/ft) fall back to its one fixed
+    journal slot name -- every ship has exactly one, so that's not a
+    guess. Anything else with nothing fitted (optional internals,
+    hardpoints, utility mounts) has no verified way to map Coriolis's
+    slot-size layout to the journal's own slot names (see the plan's
+    Review Focus #2 scope note) -- rather than guess, this asks for an
+    explicit slot, the same honest treatment bulkheads already get."""
     if explicit_slot:
-        return explicit_slot, None
-    if grp in STANDARD_SLOT_NAMES:
-        return STANDARD_SLOT_NAMES[grp], None
+        return _resolve_explicit_slot_casing(conn, explicit_slot), None
 
     fitted = conn.execute(
         "SELECT clm.slot FROM current_loadout_modules clm "
@@ -502,192 +585,101 @@ def _resolve_target_slot(conn, ship_key, grp, explicit_slot):
         return fitted[0]["slot"], None
     if len(fitted) > 1:
         return None, f"ship has {len(fitted)} slots of that type fitted -- specify which slot"
+    if grp in STANDARD_SLOT_NAMES:
+        return STANDARD_SLOT_NAMES[grp], None
     return None, "nothing of that type is currently fitted, so there's no slot to resolve automatically -- specify slot explicitly (e.g. an empty utility slot's name)"
 
 
-@_needs_setup
-def simulate_module_swap(module_group: str, module_class: int, module_rating: str,
-                          blueprint_name: str = None, grade: int = None, slot: str = None,
-                          variant: str = None) -> dict:
-    """'What if I fit X instead' -- swaps one module in the commander's
-    CURRENT loadout for a hypothetical one and reports the real resulting
-    mass/jump-range/power deltas. Never invents a number: an
-    unrecognized module group, an incompatible class/rating, or a
-    blueprint that doesn't apply to this module category all return a
-    plain not-found/incompatible result instead."""
-    grp = _module_group_to_grp(module_group)
-    if grp is None:
-        return {"found": False, "reason": f"'{module_group}' isn't a recognized module type"}
+def _resolve_ship_stats(conn, ship_key):
+    """current_loadout.ship_key -> its ship_stats row: a direct match
+    first, then through JOURNAL_SHIP_TO_CORIOLIS for the ships where the
+    journal's internal name doesn't match Coriolis's own key."""
+    if not ship_key:
+        return None
+    row = conn.execute("SELECT * FROM ship_stats WHERE lower(ship_key) = lower(?)", (ship_key,)).fetchone()
+    if row:
+        return row
+    mapped = JOURNAL_SHIP_TO_CORIOLIS.get(ship_key.lower())
+    if not mapped:
+        return None
+    return conn.execute("SELECT * FROM ship_stats WHERE lower(ship_key) = lower(?)", (mapped,)).fetchone()
 
-    conn = _connect()
 
-    baseline = conn.execute("SELECT * FROM current_loadout WHERE id = 1").fetchone()
-    if not baseline or not baseline["ship_key"]:
-        conn.close()
-        return {"found": False, "reason": "no current loadout captured yet -- journal_watcher may not be running"}
+def _slot_max_class(conn, ship_key, grp, target_slot, old_stats):
+    """The largest module class target_slot can hold, or (None, reason)
+    when that can't be determined -- R6 requires failing closed rather
+    than ever claiming a fit that wasn't actually checked.
 
-    target_slot, slot_error = _resolve_target_slot(conn, baseline["ship_key"], grp, slot)
-    if slot_error:
-        conn.close()
-        return {"found": False, "reason": slot_error}
+    - Standard slots: ship_stats.slots_json["standard"], indexed by
+      STANDARD_SLOTS_ORDER (verified: 12,068 real-loadout checks, 0
+      violations).
+    - Optional internal SlotNN_SizeM: M, or the class of whatever's
+      currently fitted there if that's larger (the one real exception --
+      the Keelback's Slot03_Size3 holding a class-4 cargo rack -- falls
+      out of this generic rule, no special-casing needed).
+    - Hardpoints (Tiny|Small|Medium|Large|Huge)(Mining)?HardpointN: a
+      fixed size-word -> class mapping (verified: 3,020 checks, 0
+      violations).
+    """
+    if grp in STANDARD_SLOT_NAMES:
+        ship_row = _resolve_ship_stats(conn, ship_key)
+        if not ship_row:
+            return None, f"don't know {ship_key}'s slot layout, so the fit can't be checked"
+        standard_sizes = json.loads(ship_row["slots_json"]).get("standard") or []
+        if len(standard_sizes) != len(STANDARD_SLOTS_ORDER):
+            return None, f"don't know {ship_key}'s standard slot sizes, so the fit can't be checked"
+        return standard_sizes[STANDARD_SLOTS_ORDER.index(grp)], None
 
-    # Several real modules can share one group/class/rating (standard vs SCO
-    # FSDs, fixed/gimballed/turret mounts, standard vs Guardian power plants
-    # -- 100 such combinations in coriolis-data, verified). Their stats differ
-    # materially, so never pick one arbitrarily: narrow by `variant` if given,
-    # otherwise list the candidates and ask, the same honest treatment an
-    # ambiguous slot gets.
-    candidates = conn.execute(
-        "SELECT * FROM module_stats WHERE grp = ? AND class = ? AND lower(rating) = lower(?)",
-        (grp, module_class, module_rating),
-    ).fetchall()
-    if variant:
-        wanted = variant.strip().lower()
-        exact = [c for c in candidates if c["symbol"] == wanted]
-        candidates = exact or [c for c in candidates if wanted in _variant_search_text(c)]
-    if not candidates:
-        conn.close()
-        suffix = f" matching '{variant}'" if variant else ""
-        return {"found": False, "reason": f"no {module_group} of class {module_class} rating {module_rating}{suffix} exists"}
-    if len(candidates) > 1:
-        conn.close()
-        return {
-            "found": False,
-            "reason": f"{len(candidates)} different modules are {module_group} class {module_class} rating {module_rating} -- specify which with `variant`",
-            "variants": [_describe_variant(c) for c in candidates],
-        }
-    new_module = candidates[0]
+    m = _OPTIONAL_INTERNAL_SLOT_RE.match(target_slot)
+    if m:
+        max_class = int(m.group(1))
+        if old_stats and old_stats["class"] and old_stats["class"] > max_class:
+            max_class = old_stats["class"]
+        return max_class, None
 
-    old_module_row = conn.execute(
-        "SELECT * FROM current_loadout_modules WHERE slot = ?", (target_slot,)
-    ).fetchone()
-    old_stats = conn.execute(
-        "SELECT * FROM module_stats WHERE symbol = ?",
-        (old_module_row["item"].lower() if old_module_row else None,),
-    ).fetchone() if old_module_row else None
+    m = _HARDPOINT_SLOT_RE.match(target_slot)
+    if m:
+        return _HARDPOINT_MAX_CLASS[m.group(1).lower()], None
 
-    new_mass_min = new_mass_max = new_module["mass"] or 0.0
-    new_power_min = new_power_max = new_module["power"] or 0.0
-    blueprint_note = None
-    unmodeled_keys = []
+    return None, f"don't recognize '{target_slot}''s size, so the fit can't be checked"
 
-    if blueprint_name:
-        # Match by the FULL friendly module_group phrase against Coriolis's
-        # own applies_to text (e.g. "power plant" in "power plant"; "shield
-        # booster" in "shield booster") -- verified against real data for
-        # every category in MODULE_GROUP_TO_GRP before writing this. The
-        # short grp code (e.g. "pp", "s", "t") is deliberately NOT used
-        # here: single/double-letter codes are a near-guaranteed false-
-        # positive substring match against arbitrary text. Note
-        # blueprint_mapping.MODULE_TO_CORIOLIS_KEYWORDS is NOT reused here
-        # either -- checked its actual keys while writing this plan, and it
-        # only covers hardpoints/optional-internals/utility modules, not
-        # core internals like the FSD or power plant.
-        candidates = conn.execute(
-            "SELECT applies_to, feature_ranges_json FROM coriolis_blueprints "
-            "WHERE grade = ? AND lower(upgrade_name) = lower(?)",
-            (grade, blueprint_name),
-        ).fetchall() if grade else []
-        match = None
-        for c in candidates:
-            if module_group.strip().lower() in c["applies_to"].lower():
-                match = c
-                break
-        if not match:
-            conn.close()
-            return {"found": False, "reason": f"'{blueprint_name}' grade {grade} doesn't apply to {module_group}"}
-        features = json.loads(match["feature_ranges_json"])
-        applied_keys = set()
-        if "mass" in features:
-            new_mass_min, new_mass_max = apply_blueprint_delta(new_module["mass"], features["mass"])
-            applied_keys.add("mass")
-        if "power" in features:
-            new_power_min, new_power_max = apply_blueprint_delta(new_module["power"], features["power"])
-            applied_keys.add("power")
-        if grp == "fsd" and "optmass" in features:
-            applied_keys.add("optmass")  # applied separately below, in the jump-range section
-        blueprint_note = blueprint_name
-        # honesty check: a features key this code doesn't know how to apply
-        # (e.g. a weapon's "damage"/"rof") must be reported, never silently
-        # dropped -- the numbers below would otherwise look complete while
-        # missing a real part of the blueprint's effect.
-        unmodeled_keys = sorted(set(features) - applied_keys)
 
-    old_mass = old_stats["mass"] if old_stats else 0.0
-    old_power = old_stats["power"] if old_stats else 0.0
-    mass_change_min = new_mass_min - old_mass
-    mass_change_max = new_mass_max - old_mass
-    new_unladen_min = baseline["unladen_mass"] + mass_change_min
-    new_unladen_max = baseline["unladen_mass"] + mass_change_max
+def _engineered_modifier(modifiers_json, label):
+    """One journal Engineering.Modifiers entry's real Value by Label, or
+    None if there's no Engineering block or no modifier with that label."""
+    if not modifiers_json:
+        return None
+    for mod in json.loads(modifiers_json):
+        if mod.get("Label") == label:
+            return mod.get("Value")
+    return None
 
-    # jump range needs the ship's EFFECTIVE fsd stats -- if the FSD itself
-    # is the slot being swapped, that's the new module (+ blueprint, if
-    # given); otherwise it's the CURRENT fsd's real reported stats
-    # (preferring the journal's own engineering values over recomputed
-    # blueprint math -- see Global Constraints).
-    if grp == "fsd":
-        fsd_optmass = new_module_extra_get(new_module, "optmass")
-        fsd_maxfuel = new_module_extra_get(new_module, "maxfuel")
-        fsd_fuelmul = new_module_extra_get(new_module, "fuelmul")
-        fsd_fuelpower = new_module_extra_get(new_module, "fuelpower")
-        if blueprint_name and "optmass" in features:
-            optmass_min, optmass_max = apply_blueprint_delta(fsd_optmass, features["optmass"])
-        else:
-            optmass_min = optmass_max = fsd_optmass
-    else:
-        fsd_row = conn.execute(
-            "SELECT clm.item, clm.engineering_modifiers_json, ms.* FROM current_loadout_modules clm "
-            "JOIN module_stats ms ON ms.symbol = lower(clm.item) WHERE clm.slot = 'FrameShiftDrive'"
-        ).fetchone()
-        base_optmass = new_module_extra_get(fsd_row, "optmass") if fsd_row else None
-        fsd_maxfuel = new_module_extra_get(fsd_row, "maxfuel") if fsd_row else None
-        fsd_fuelmul = new_module_extra_get(fsd_row, "fuelmul") if fsd_row else None
-        fsd_fuelpower = new_module_extra_get(fsd_row, "fuelpower") if fsd_row else None
-        optmass_min = optmass_max = base_optmass
-        if fsd_row and fsd_row["engineering_modifiers_json"]:
-            for mod in json.loads(fsd_row["engineering_modifiers_json"]):
-                if mod["Label"] == "FSDOptimalMass":
-                    optmass_min = optmass_max = mod["Value"]
 
-    # Guardian FSD Booster: a flat additive jump-range bonus (loadout_calc.compute_jump_range's
-    # booster_bonus parameter -- see that function's own docstring for the honest caveat that
-    # this addition, unlike the base formula, isn't cross-verified against a real boosted ship).
-    # Resolved the same way as the effective FSD stats above: if the booster ITSELF is the slot
-    # being swapped, use the new module's jumpboost; otherwise use whatever booster (if any) is
-    # currently fitted. No booster fitted and none being added -> 0.0, unchanged behavior.
-    if grp == "gfsb":
-        booster_bonus = new_module_extra_get(new_module, "jumpboost") or 0.0
-    else:
-        booster_row = conn.execute(
-            "SELECT ms.extra_json FROM current_loadout_modules clm "
-            "JOIN module_stats ms ON ms.symbol = lower(clm.item) WHERE ms.grp = 'gfsb'"
-        ).fetchone()
-        booster_bonus = (new_module_extra_get(booster_row, "jumpboost") if booster_row else None) or 0.0
+def _engineered_or_base(modifiers_json, label, base_value):
+    """The journal's real engineered value for `label` if present (ground
+    truth for a module the commander actually has fitted), else the base
+    module_stats value -- NULL there means 0.0 (R2): Coriolis omits
+    zero-valued fields, never treat a known module as massless/powerless
+    just because that field is absent."""
+    value = _engineered_modifier(modifiers_json, label)
+    return value if value is not None else (base_value or 0.0)
 
-    conn.close()
 
-    if None in (fsd_maxfuel, fsd_fuelmul, fsd_fuelpower, optmass_min):
-        new_range_min = new_range_max = None
-    else:
-        new_range_min = compute_jump_range(new_unladen_max, optmass_min, fsd_maxfuel, fsd_fuelmul, fsd_fuelpower, booster_bonus)
-        new_range_max = compute_jump_range(new_unladen_min, optmass_max, fsd_maxfuel, fsd_fuelmul, fsd_fuelpower, booster_bonus)
+def new_module_extra_get(module_row, key):
+    """extra_json[key] for a module_stats row, or None if the row/key is
+    absent. Small helper so the fsd-stat lookups above stay readable."""
+    if module_row is None or module_row["extra_json"] is None:
+        return None
+    return json.loads(module_row["extra_json"]).get(key)
 
-    return {
-        "found": True,
-        "compatible": True,
-        "slot": target_slot,
-        "removed": {"item": old_module_row["item"] if old_module_row else None},
-        "added": {
-            "symbol": new_module["symbol"], "class": module_class, "rating": module_rating,
-            "blueprint": blueprint_note,
-            "mass": _min_max_or_single(new_mass_min, new_mass_max),
-            "power": _min_max_or_single(new_power_min, new_power_max),
-        },
-        "mass_change": _min_max_or_single(mass_change_min, mass_change_max),
-        "new_unladen_mass": _min_max_or_single(new_unladen_min, new_unladen_max),
-        "new_jump_range": _min_max_or_single(new_range_min, new_range_max) if new_range_min is not None else None,
-        "unmodeled_blueprint_effects": unmodeled_keys,  # honestly-reported, never silently dropped
-    }
+
+def _min_max_or_single(lo, hi, ndigits=2):
+    """A genuine roll-dependent range as {"min", "max"}; collapses to one
+    plain rounded number when lo == hi (deterministic) -- matches the
+    spec's stated result shape and Review Focus #5: never present a
+    fabricated spread when the real answer is exact."""
+    lo_r, hi_r = round(lo, ndigits), round(hi, ndigits)
+    return lo_r if lo_r == hi_r else {"min": lo_r, "max": hi_r}
 
 
 _MOUNT_WORDS = {"F": "fixed", "G": "gimballed", "T": "turret"}
@@ -712,18 +704,318 @@ def _describe_variant(module_row):
     }
 
 
-def new_module_extra_get(module_row, key):
-    """extra_json[key] for a module_stats row, or None if the row/key is
-    absent. Small helper so the fsd-stat lookups above stay readable."""
-    if module_row is None or module_row["extra_json"] is None:
-        return None
-    return json.loads(module_row["extra_json"]).get(key)
+def _draws_nothing(item_lower):
+    """Cockpits/armour/cosmetics are ship-cosmetic or bulkhead-only slots,
+    never present in module_stats -- checked by name so they're never
+    mistaken for an unknown module in the power-margin sum (R7)."""
+    if item_lower.endswith(_ZERO_DRAW_SUFFIXES):
+        return True
+    if item_lower.startswith(_ZERO_DRAW_PREFIXES):
+        return True
+    return any(s in item_lower for s in _ZERO_DRAW_SUBSTRINGS)
 
 
-def _min_max_or_single(lo, hi, ndigits=2):
-    """A genuine roll-dependent range as {"min", "max"}; collapses to one
-    plain rounded number when lo == hi (deterministic) -- matches the
-    spec's stated result shape and Review Focus #5: never present a
-    fabricated spread when the real answer is exact."""
-    lo_r, hi_r = round(lo, ndigits), round(hi, ndigits)
-    return lo_r if lo_r == hi_r else {"min": lo_r, "max": hi_r}
+def _power_draw_total(conn, target_slot):
+    """Sum of power draw for every currently-On module except the one in
+    target_slot (that one's being removed -- R5's "a removed module
+    contributes nothing" applies to power too, not just the FSD
+    booster's jump bonus). Hardpoints included; the cargo hatch counts as
+    a flat 0.6 MW when On (R7); a module's own real engineered PowerDraw
+    is preferred over its base module_stats value, consistent with this
+    project's global "prefer the journal's ground truth" rule. Returns
+    (total, unknown_items): unknown_items is non-empty when an On module
+    outside the zero-draw/cargo-hatch categories isn't in module_stats --
+    the caller must treat the margin as unknowable, never silently
+    omit it (R7)."""
+    rows = conn.execute(
+        "SELECT slot, item, engineering_modifiers_json FROM current_loadout_modules "
+        "WHERE is_on = 1 AND slot != ?", (target_slot,),
+    ).fetchall()
+    total = 0.0
+    unknown = []
+    for row in rows:
+        item_lower = row["item"].lower()
+        if item_lower.startswith("modularcargobaydoor"):
+            total += 0.6
+            continue
+        if _draws_nothing(item_lower):
+            continue
+        engineered = _engineered_modifier(row["engineering_modifiers_json"], "PowerDraw")
+        if engineered is not None:
+            total += engineered
+            continue
+        stats = conn.execute("SELECT power FROM module_stats WHERE symbol = ?", (item_lower,)).fetchone()
+        if stats is None:
+            unknown.append(row["item"])
+            continue
+        total += stats["power"] or 0.0
+    return total, unknown
+
+
+def _effective_plant_output(conn, grp, new_module, features):
+    """(min, max) power plant output in MW. If the plant itself is being
+    swapped, that's the new module's pgen (+ the blueprint's pgen delta,
+    if one applies); otherwise it's the CURRENTLY fitted plant's real
+    reported output -- the journal's own PowerCapacity if it's engineered
+    (ground truth), else its base module_stats pgen. Returns (None, None)
+    when the currently-fitted plant can't be resolved at all, so the
+    caller reports an honestly-unknown margin instead of a guess."""
+    if grp == "pp":
+        base = new_module_extra_get(new_module, "pgen") or 0.0
+        if "pgen" in features:
+            return apply_blueprint_delta(base, features["pgen"])
+        return base, base
+
+    plant_row = conn.execute(
+        "SELECT clm.engineering_modifiers_json, ms.extra_json FROM current_loadout_modules clm "
+        "JOIN module_stats ms ON ms.symbol = lower(clm.item) WHERE clm.slot = ?",
+        (STANDARD_SLOT_NAMES["pp"],),
+    ).fetchone()
+    if not plant_row:
+        return None, None
+    capacity = _engineered_modifier(plant_row["engineering_modifiers_json"], "PowerCapacity")
+    if capacity is not None:
+        return capacity, capacity
+    pgen = new_module_extra_get(plant_row, "pgen") or 0.0
+    return pgen, pgen
+
+
+@_needs_setup
+def simulate_module_swap(module_group: str, module_class: int, module_rating: str,
+                          blueprint_name: str = None, grade: int = None, slot: str = None,
+                          variant: str = None) -> dict:
+    """'What if I fit X instead' -- swaps one module in the commander's
+    CURRENT loadout for a hypothetical one and reports the real resulting
+    mass/jump-range/power deltas. Never invents a number: an
+    unrecognized module group, an incompatible class/rating, or a
+    blueprint that doesn't apply to this module category all return a
+    plain not-found/incompatible result instead."""
+    grp = _module_group_to_grp(module_group)
+    if grp is None:
+        return {"found": False, "reason": f"'{module_group}' isn't a recognized module type"}
+
+    conn = _connect()
+    try:
+        baseline = conn.execute("SELECT * FROM current_loadout WHERE id = 1").fetchone()
+        if not baseline or not baseline["ship_key"]:
+            return {"found": False, "reason": "no current loadout captured yet -- journal_watcher may not be running"}
+
+        target_slot, slot_error = _resolve_target_slot(conn, baseline["ship_key"], grp, slot)
+        if slot_error:
+            return {"found": False, "reason": slot_error}
+
+        # A standard slot only ever holds its own group (R5) -- this can only
+        # trigger from an explicit `slot`, since the resolution above never
+        # returns a standard name for the wrong grp on its own.
+        if target_slot in STANDARD_SLOT_NAMES.values() and STANDARD_SLOT_NAMES.get(grp) != target_slot:
+            owner_grp = next(g for g, name in STANDARD_SLOT_NAMES.items() if name == target_slot)
+            return {
+                "found": True, "compatible": False, "slot": target_slot,
+                "reason": f"{target_slot} only takes a {STANDARD_GRP_DISPLAY.get(owner_grp, owner_grp)}",
+            }
+
+        # Several real modules can share one group/class/rating (standard vs SCO
+        # FSDs, fixed/gimballed/turret mounts, standard vs Guardian power plants
+        # -- 100 such combinations in coriolis-data, verified). Their stats differ
+        # materially, so never pick one arbitrarily: narrow by `variant` if given,
+        # otherwise list the candidates and ask, the same honest treatment an
+        # ambiguous slot gets.
+        candidates = conn.execute(
+            "SELECT * FROM module_stats WHERE grp = ? AND class = ? AND lower(rating) = lower(?)",
+            (grp, module_class, module_rating),
+        ).fetchall()
+        if variant:
+            wanted = variant.strip().lower()
+            exact = [c for c in candidates if c["symbol"] == wanted]
+            candidates = exact or [c for c in candidates if wanted in _variant_search_text(c)]
+        if not candidates:
+            suffix = f" matching '{variant}'" if variant else ""
+            return {"found": False, "reason": f"no {module_group} of class {module_class} rating {module_rating}{suffix} exists"}
+        if len(candidates) > 1:
+            return {
+                "found": False,
+                "reason": f"{len(candidates)} different modules are {module_group} class {module_class} rating {module_rating} -- specify which with `variant`",
+                "variants": [_describe_variant(c) for c in candidates],
+            }
+        new_module = candidates[0]
+
+        old_module_row = conn.execute(
+            "SELECT * FROM current_loadout_modules WHERE slot = ?", (target_slot,)
+        ).fetchone()
+        old_stats = conn.execute(
+            "SELECT * FROM module_stats WHERE symbol = ?",
+            (old_module_row["item"].lower() if old_module_row else None,),
+        ).fetchone() if old_module_row else None
+        if old_module_row and not old_stats:
+            # R2: never treat an unrecognized fitted module as massless --
+            # refuse honestly instead of fabricating a "0" for it.
+            return {
+                "found": False,
+                "reason": f"the module currently in {target_slot} ({old_module_row['item']}) isn't in Ellie's module data, so the change can't be computed",
+            }
+
+        max_class, size_reason = _slot_max_class(conn, baseline["ship_key"], grp, target_slot, old_stats)
+        if max_class is None:
+            return {"found": False, "reason": size_reason}
+        if module_class > max_class:
+            return {
+                "found": True, "compatible": False, "slot": target_slot,
+                "reason": f"a class {module_class} {module_group} doesn't fit {target_slot} (max class {max_class})",
+            }
+
+        new_mass_min = new_mass_max = new_module["mass"] or 0.0
+        new_power_min = new_power_max = new_module["power"] or 0.0
+        blueprint_note = None
+        features = {}
+        unmodeled_keys = []
+
+        if blueprint_name:
+            if not grade:
+                return {"found": False, "reason": "a blueprint grade (1-5) is required"}
+            if grp not in GRP_TO_BLUEPRINT_CATEGORIES:
+                return {"found": False, "reason": f"no engineering blueprints exist for {module_group} in Ellie's data"}
+
+            # Whole-token match against Coriolis's own applies_to text (R4) --
+            # NOT a substring match: "t" is a substring of "shift", "pp" is a
+            # substring of "su-pp-ort", so a raw grp code or short friendly
+            # name could false-positive-match an unrelated category's text.
+            # blueprint_mapping.MODULE_TO_CORIOLIS_KEYWORDS is NOT reused here
+            # either -- checked its actual keys while writing this plan, and it
+            # only covers hardpoints/optional-internals/utility modules, not
+            # core internals like the FSD or power plant.
+            own_categories = {c.lower() for c in GRP_TO_BLUEPRINT_CATEGORIES[grp]}
+            bp_candidates = conn.execute(
+                "SELECT applies_to, feature_ranges_json FROM coriolis_blueprints "
+                "WHERE grade = ? AND lower(upgrade_name) = lower(?)",
+                (grade, blueprint_name),
+            ).fetchall()
+            match = None
+            for c in bp_candidates:
+                tokens = {t.strip().lower() for t in c["applies_to"].split(",")}
+                if tokens & own_categories:
+                    match = c
+                    break
+            if not match:
+                return {"found": False, "reason": f"'{blueprint_name}' grade {grade} doesn't apply to {module_group}"}
+
+            features = json.loads(match["feature_ranges_json"])
+            applied_keys = set()
+            if "mass" in features:
+                new_mass_min, new_mass_max = apply_blueprint_delta(new_module["mass"] or 0.0, features["mass"])
+                applied_keys.add("mass")
+            if "power" in features:
+                new_power_min, new_power_max = apply_blueprint_delta(new_module["power"] or 0.0, features["power"])
+                applied_keys.add("power")
+            if grp == "fsd" and "optmass" in features:
+                applied_keys.add("optmass")  # applied separately below, in the jump-range section
+            if grp == "pp" and "pgen" in features:
+                applied_keys.add("pgen")  # applied separately below, in the power-margin section
+            blueprint_note = blueprint_name
+            # honesty check: a features key this code doesn't know how to apply
+            # (e.g. a weapon's "damage"/"rof") must be reported, never silently
+            # dropped -- the numbers below would otherwise look complete while
+            # missing a real part of the blueprint's effect.
+            unmodeled_keys = sorted(set(features) - applied_keys)
+
+        # R2: the removed module's REAL mass/power -- the journal's own
+        # engineered Mass/PowerDraw if present (ground truth), else the base
+        # module_stats value (NULL there means 0.0, never "unknown").
+        if old_module_row:
+            old_mass = _engineered_or_base(old_module_row["engineering_modifiers_json"], "Mass", old_stats["mass"])
+            old_power = _engineered_or_base(old_module_row["engineering_modifiers_json"], "PowerDraw", old_stats["power"])
+        else:
+            old_mass = old_power = 0.0
+
+        mass_change_min = new_mass_min - old_mass
+        mass_change_max = new_mass_max - old_mass
+        new_unladen_min = baseline["unladen_mass"] + mass_change_min
+        new_unladen_max = baseline["unladen_mass"] + mass_change_max
+        power_change_min = new_power_min - old_power
+        power_change_max = new_power_max - old_power
+
+        # jump range needs the ship's EFFECTIVE fsd stats -- if the FSD itself
+        # is the slot being swapped, that's the new module (+ blueprint, if
+        # given); otherwise it's the CURRENT fsd's real reported stats
+        # (preferring the journal's own engineering values over recomputed
+        # blueprint math -- see Global Constraints).
+        if grp == "fsd":
+            fsd_optmass = new_module_extra_get(new_module, "optmass")
+            fsd_maxfuel = new_module_extra_get(new_module, "maxfuel")
+            fsd_fuelmul = new_module_extra_get(new_module, "fuelmul")
+            fsd_fuelpower = new_module_extra_get(new_module, "fuelpower")
+            if "optmass" in features:
+                optmass_min, optmass_max = apply_blueprint_delta(fsd_optmass, features["optmass"])
+            else:
+                optmass_min = optmass_max = fsd_optmass
+        else:
+            fsd_row = conn.execute(
+                "SELECT clm.item, clm.engineering_modifiers_json, ms.* FROM current_loadout_modules clm "
+                "JOIN module_stats ms ON ms.symbol = lower(clm.item) WHERE clm.slot = ?",
+                (STANDARD_SLOT_NAMES["fsd"],),
+            ).fetchone()
+            base_optmass = new_module_extra_get(fsd_row, "optmass") if fsd_row else None
+            fsd_maxfuel = new_module_extra_get(fsd_row, "maxfuel") if fsd_row else None
+            fsd_fuelmul = new_module_extra_get(fsd_row, "fuelmul") if fsd_row else None
+            fsd_fuelpower = new_module_extra_get(fsd_row, "fuelpower") if fsd_row else None
+            optmass_min = optmass_max = _engineered_or_base(
+                fsd_row["engineering_modifiers_json"] if fsd_row else None, "FSDOptimalMass", base_optmass
+            ) if fsd_row else base_optmass
+
+        # Guardian FSD Booster: a flat additive jump-range bonus (loadout_calc.compute_jump_range's
+        # booster_bonus parameter -- see that function's own docstring for the honest caveat that
+        # this addition, unlike the base formula, isn't cross-verified against a real boosted ship).
+        # Resolved the same way as the effective FSD stats above: if the booster ITSELF is the slot
+        # being swapped, use the new module's jumpboost; otherwise use whatever booster (if any) is
+        # currently fitted EXCLUDING the target slot (R5) -- a booster being removed contributes
+        # nothing, even though its row is still in current_loadout_modules until this swap happens.
+        if grp == "gfsb":
+            booster_bonus = new_module_extra_get(new_module, "jumpboost") or 0.0
+        else:
+            booster_row = conn.execute(
+                "SELECT ms.extra_json FROM current_loadout_modules clm "
+                "JOIN module_stats ms ON ms.symbol = lower(clm.item) WHERE ms.grp = 'gfsb' AND clm.slot != ?",
+                (target_slot,),
+            ).fetchone()
+            booster_bonus = (new_module_extra_get(booster_row, "jumpboost") if booster_row else None) or 0.0
+
+        if None in (fsd_maxfuel, fsd_fuelmul, fsd_fuelpower, optmass_min):
+            new_range_min = new_range_max = None
+        else:
+            new_range_min = compute_jump_range(new_unladen_max, optmass_min, fsd_maxfuel, fsd_fuelmul, fsd_fuelpower, booster_bonus)
+            new_range_max = compute_jump_range(new_unladen_min, optmass_max, fsd_maxfuel, fsd_fuelmul, fsd_fuelpower, booster_bonus)
+
+        # R7: power margin on a DEPLOYED basis -- effective plant output minus
+        # every currently-On module's draw (target slot's old module excluded,
+        # the new module's draw added instead), hardpoints and the cargo
+        # hatch's flat 0.6 MW included. An On module this code can't identify
+        # makes the margin honestly unknown, never a guess.
+        plant_output_min, plant_output_max = _effective_plant_output(conn, grp, new_module, features)
+        draw_total, unknown_power_items = _power_draw_total(conn, target_slot)
+        if plant_output_min is None or unknown_power_items:
+            new_power_margin = None
+        else:
+            margin_min = plant_output_min - (draw_total + new_power_max)
+            margin_max = plant_output_max - (draw_total + new_power_min)
+            new_power_margin = _min_max_or_single(margin_min, margin_max)
+
+        return {
+            "found": True,
+            "compatible": True,
+            "slot": target_slot,
+            "removed": {"item": old_module_row["item"] if old_module_row else None},
+            "added": {
+                "symbol": new_module["symbol"], "class": module_class, "rating": module_rating,
+                "blueprint": blueprint_note,
+                "mass": _min_max_or_single(new_mass_min, new_mass_max),
+                "power": _min_max_or_single(new_power_min, new_power_max),
+            },
+            "mass_change": _min_max_or_single(mass_change_min, mass_change_max),
+            "new_unladen_mass": _min_max_or_single(new_unladen_min, new_unladen_max),
+            "new_jump_range": _min_max_or_single(new_range_min, new_range_max) if new_range_min is not None else None,
+            "power_change": _min_max_or_single(power_change_min, power_change_max),
+            "new_power_margin": new_power_margin,
+            "power_unknown_modules": unknown_power_items,  # honestly-reported, never silently dropped
+            "unmodeled_blueprint_effects": unmodeled_keys,  # honestly-reported, never silently dropped
+        }
+    finally:
+        conn.close()

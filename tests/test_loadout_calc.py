@@ -54,6 +54,14 @@ def test_apply_blueprint_delta_real_range():
     assert lo < hi
 
 
+def test_apply_blueprint_delta_sorts_a_larger_first_range():
+    # Coriolis stores 155 real feature ranges larger-first when a blueprint
+    # LOWERS the stat -- e.g. Lightweight grade 1's mass: [0, -0.45]. The
+    # returned pair must still come out (min, max), not the raw input order.
+    lo, hi = apply_blueprint_delta(10.0, [0, -0.45])
+    assert (lo, hi) == (5.5, 10.0)
+
+
 def test_compute_jump_range_with_guardian_fsd_booster():
     # Guardian FSD Booster (e.g. class 2) adds a flat ly bonus to jump range.
     # The booster contribution must be additive post-computation.

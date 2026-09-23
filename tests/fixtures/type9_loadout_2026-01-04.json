@@ -1,0 +1,162 @@
+{
+ "timestamp": "2026-01-04T15:34:02Z",
+ "event": "Loadout",
+ "Ship": "type9",
+ "ShipID": 43,
+ "UnladenMass": 1122.0,
+ "CargoCapacity": 348,
+ "MaxJumpRange": 9.164523,
+ "FuelCapacity": {
+  "Main": 64.0,
+  "Reserve": 0.77
+ },
+ "Modules": [
+  {
+   "Slot": "MediumHardpoint2",
+   "Item": "hpt_pulselaser_fixed_small",
+   "On": true,
+   "Priority": 2,
+   "Health": 1.0
+  },
+  {
+   "Slot": "Armour",
+   "Item": "type9_armour_grade1",
+   "On": true,
+   "Priority": 1,
+   "Health": 1.0
+  },
+  {
+   "Slot": "PowerPlant",
+   "Item": "int_powerplant_size6_class1",
+   "On": true,
+   "Priority": 1,
+   "Health": 1.0
+  },
+  {
+   "Slot": "MainEngines",
+   "Item": "int_engine_size7_class1",
+   "On": true,
+   "Priority": 2,
+   "Health": 1.0
+  },
+  {
+   "Slot": "FrameShiftDrive",
+   "Item": "int_hyperdrive_size6_class1",
+   "On": true,
+   "Priority": 2,
+   "Health": 1.0
+  },
+  {
+   "Slot": "LifeSupport",
+   "Item": "int_lifesupport_size5_class1",
+   "On": true,
+   "Priority": 2,
+   "Health": 1.0
+  },
+  {
+   "Slot": "PowerDistributor",
+   "Item": "int_powerdistributor_size6_class1",
+   "On": true,
+   "Priority": 2,
+   "Health": 1.0
+  },
+  {
+   "Slot": "Radar",
+   "Item": "int_sensors_size4_class1",
+   "On": true,
+   "Priority": 2,
+   "Health": 1.0
+  },
+  {
+   "Slot": "FuelTank",
+   "Item": "int_fueltank_size6_class3",
+   "On": true,
+   "Priority": 1,
+   "Health": 1.0
+  },
+  {
+   "Slot": "Slot00_Size8",
+   "Item": "int_cargorack_size7_class1",
+   "On": true,
+   "Priority": 1,
+   "Health": 1.0
+  },
+  {
+   "Slot": "Slot01_Size8",
+   "Item": "int_cargorack_size7_class1",
+   "On": true,
+   "Priority": 1,
+   "Health": 1.0
+  },
+  {
+   "Slot": "Slot02_Size7",
+   "Item": "int_cargorack_size6_class1",
+   "On": true,
+   "Priority": 1,
+   "Health": 1.0
+  },
+  {
+   "Slot": "Slot03_Size6",
+   "Item": "int_shieldgenerator_size6_class1",
+   "On": true,
+   "Priority": 2,
+   "Health": 1.0
+  },
+  {
+   "Slot": "Slot04_Size5",
+   "Item": "int_cargorack_size4_class1",
+   "On": true,
+   "Priority": 1,
+   "Health": 1.0
+  },
+  {
+   "Slot": "Slot05_Size4",
+   "Item": "int_cargorack_size3_class1",
+   "On": true,
+   "Priority": 1,
+   "Health": 1.0
+  },
+  {
+   "Slot": "Slot07_Size3",
+   "Item": "int_cargorack_size2_class1",
+   "On": true,
+   "Priority": 1,
+   "Health": 1.0
+  },
+  {
+   "Slot": "Slot12_Size1",
+   "Item": "int_supercruiseassist",
+   "On": true,
+   "Priority": 2,
+   "Health": 1.0
+  },
+  {
+   "Slot": "PlanetaryApproachSuite",
+   "Item": "int_planetapproachsuite_advanced",
+   "On": true,
+   "Priority": 1,
+   "Health": 1.0
+  },
+  {
+   "Slot": "VesselVoice",
+   "Item": "voicepack_verity",
+   "On": true,
+   "Priority": 1,
+   "Health": 1.0
+  },
+  {
+   "Slot": "ShipCockpit",
+   "Item": "type9_cockpit",
+   "On": true,
+   "Priority": 1,
+   "Health": 1.0
+  },
+  {
+   "Slot": "CargoHatch",
+   "Item": "modularcargobaydoor",
+   "On": true,
+   "Priority": 2,
+   "Health": 1.0
+  }
+ ]
+}
