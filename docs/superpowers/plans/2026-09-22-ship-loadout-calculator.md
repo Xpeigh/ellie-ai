@@ -874,7 +874,7 @@ git commit -m "Add the verified jump-range and blueprint-delta calculation core"
 
 **Interfaces:**
 - Consumes: `loadout_calc.compute_jump_range`, `loadout_calc.apply_blueprint_delta` (Task 4); `ship_stats`/`module_stats` (Task 1); `current_loadout`/`current_loadout_modules` (Task 2); `coriolis_blueprints` (already existed before this plan, used by `get_blueprint`).
-- Produces: `simulate_module_swap(module_group, module_class, module_rating, blueprint_name=None, grade=None, slot=None) -> dict`, plus a new `MODULE_GROUP_TO_GRP` mapping dict in `query_functions.py`.
+- Produces: `simulate_module_swap(module_group, module_class, module_rating, blueprint_name=None, grade=None, slot=None, variant=None) -> dict`, plus a new `MODULE_GROUP_TO_GRP` mapping dict in `query_functions.py`. When several real modules share the requested group/class/rating (100 such combinations exist in coriolis-data -- every FSD class has a standard and an SCO variant, weapons have fixed/gimballed/turret mounts, power plants have standard and Guardian), the function returns `{"found": False, "reason": ..., "variants": [...]}` listing them rather than picking one; `variant` (a flat, optional string) narrows the match.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -938,9 +938,13 @@ def _db(tmp_path):
 
 def test_swap_unengineered_module_reports_deltas(tmp_path):
     _db(tmp_path)
-    # explorer_nx's FrameShiftDrive is a size-8 slot; ask for a plain,
-    # unengineered class 8 rating A standard FSD instead.
-    result = qf.simulate_module_swap(module_group="frame shift drive", module_class=8, module_rating="A")
+    # explorer_nx's FrameShiftDrive is a size-8 slot. Class 8 rating A has two
+    # real variants (both SCO: the Mk II the commander fits, and the plain SCO
+    # drive) -- ask for the plain one explicitly, unengineered.
+    result = qf.simulate_module_swap(
+        module_group="frame shift drive", module_class=8, module_rating="A",
+        variant="int_hyperdrive_overcharge_size8_class5",
+    )
     assert result["found"] is True
     assert result["compatible"] is True
     assert result["slot"] == "FrameShiftDrive"
@@ -953,6 +957,7 @@ def test_swap_with_blueprint_applies_deterministic_delta(tmp_path):
     result = qf.simulate_module_swap(
         module_group="frame shift drive", module_class=7, module_rating="E",
         blueprint_name="Increased range", grade=1,
+        variant="int_hyperdrive_size7_class1",  # the standard (non-SCO) 7E drive
     )
     assert result["found"] is True
     assert result["compatible"] is True
@@ -998,6 +1003,7 @@ def test_blueprint_effect_this_code_cant_apply_is_reported_not_dropped(tmp_path)
     result = qf.simulate_module_swap(
         module_group="frame shift drive", module_class=7, module_rating="E",
         blueprint_name="Shielded", grade=1,
+        variant="int_hyperdrive_size7_class1",
     )
     assert result["found"] is True
     assert set(result["unmodeled_blueprint_effects"]) == {"integrity", "thermload"}
@@ -1037,15 +1043,40 @@ def test_nothing_fitted_of_that_group_fails_cleanly_not_a_crash(tmp_path):
     fail with a clear, actionable reason, never a KeyError/crash, and
     never silently pick a slot."""
     _db(tmp_path)
-    result = qf.simulate_module_swap(module_group="shield booster", module_class=1, module_rating="A")
+    # shield boosters are utility mounts: class 0, ratings A-E, one module
+    # each (verified against coriolis-data)
+    result = qf.simulate_module_swap(module_group="shield booster", module_class=0, module_rating="A")
     assert result["found"] is False
     assert "slot" in result["reason"].lower()
 
-    # the explicit-slot escape hatch must work for this same case
+    # the explicit-slot escape hatch must work for this same case --
+    # "TinyHardpoint2" is the journal's real naming for a utility mount
+    # (the commander's real ship has a heat sink in TinyHardpoint1)
     result_with_slot = qf.simulate_module_swap(
-        module_group="shield booster", module_class=1, module_rating="A", slot="Slot06_Size1"
+        module_group="shield booster", module_class=0, module_rating="A", slot="TinyHardpoint2"
     )
     assert result_with_slot["found"] is True
+
+
+def test_ambiguous_module_lists_variants_instead_of_guessing(tmp_path):
+    """Several real modules share one group/class/rating with materially
+    different stats (FSD 8A: the plain SCO drive has maxfuel 20.7, the Mk II
+    has 6.8). Without a variant the tool must list them, never pick one;
+    a partial variant string must narrow to exactly one."""
+    _db(tmp_path)
+    result = qf.simulate_module_swap(module_group="frame shift drive", module_class=8, module_rating="A")
+    assert result["found"] is False
+    symbols = {v["symbol"] for v in result["variants"]}
+    assert symbols == {
+        "int_hyperdrive_overcharge_size8_class5",
+        "int_hyperdrive_overcharge_size8_class5_overchargebooster_mkii",
+    }
+
+    narrowed = qf.simulate_module_swap(
+        module_group="frame shift drive", module_class=8, module_rating="A", variant="mk ii"
+    )
+    assert narrowed["found"] is True
+    assert narrowed["added"]["symbol"] == "int_hyperdrive_overcharge_size8_class5_overchargebooster_mkii"
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -1120,7 +1151,8 @@ def _resolve_target_slot(conn, ship_key, grp, explicit_slot):
 
 @_needs_setup
 def simulate_module_swap(module_group: str, module_class: int, module_rating: str,
-                          blueprint_name: str = None, grade: int = None, slot: str = None) -> dict:
+                          blueprint_name: str = None, grade: int = None, slot: str = None,
+                          variant: str = None) -> dict:
     """'What if I fit X instead' -- swaps one module in the commander's
     CURRENT loadout for a hypothetical one and reports the real resulting
     mass/jump-range/power deltas. Never invents a number: an
@@ -1143,13 +1175,32 @@ def simulate_module_swap(module_group: str, module_class: int, module_rating: st
         conn.close()
         return {"found": False, "reason": slot_error}
 
-    new_module = conn.execute(
+    # Several real modules can share one group/class/rating (standard vs SCO
+    # FSDs, fixed/gimballed/turret mounts, standard vs Guardian power plants
+    # -- 100 such combinations in coriolis-data, verified). Their stats differ
+    # materially, so never pick one arbitrarily: narrow by `variant` if given,
+    # otherwise list the candidates and ask, the same honest treatment an
+    # ambiguous slot gets.
+    candidates = conn.execute(
         "SELECT * FROM module_stats WHERE grp = ? AND class = ? AND lower(rating) = lower(?)",
         (grp, module_class, module_rating),
-    ).fetchone()
-    if not new_module:
+    ).fetchall()
+    if variant:
+        wanted = variant.strip().lower()
+        exact = [c for c in candidates if c["symbol"] == wanted]
+        candidates = exact or [c for c in candidates if wanted in _variant_search_text(c)]
+    if not candidates:
         conn.close()
-        return {"found": False, "reason": f"no {module_group} of class {module_class} rating {module_rating} exists"}
+        suffix = f" matching '{variant}'" if variant else ""
+        return {"found": False, "reason": f"no {module_group} of class {module_class} rating {module_rating}{suffix} exists"}
+    if len(candidates) > 1:
+        conn.close()
+        return {
+            "found": False,
+            "reason": f"{len(candidates)} different modules are {module_group} class {module_class} rating {module_rating} -- specify which with `variant`",
+            "variants": [_describe_variant(c) for c in candidates],
+        }
+    new_module = candidates[0]
 
     old_module_row = conn.execute(
         "SELECT * FROM current_loadout_modules WHERE slot = ?", (target_slot,)
@@ -1283,6 +1334,28 @@ def simulate_module_swap(module_group: str, module_class: int, module_rating: st
     }
 
 
+_MOUNT_WORDS = {"F": "fixed", "G": "gimballed", "T": "turret"}
+
+
+def _variant_search_text(module_row):
+    """What a `variant` string is matched against: the symbol, Coriolis's
+    display name, and the mount spelled out -- so "gimballed", "gimbal",
+    "sco", "mk ii", "guardian" or an exact symbol all work."""
+    extra = json.loads(module_row["extra_json"] or "{}")
+    name = extra.get("name") or extra.get("ukName") or ""
+    mount = _MOUNT_WORDS.get(extra.get("mount"), "")
+    return f"{module_row['symbol']} {name} {mount}".lower()
+
+
+def _describe_variant(module_row):
+    extra = json.loads(module_row["extra_json"] or "{}")
+    return {
+        "symbol": module_row["symbol"],
+        "name": extra.get("name") or extra.get("ukName"),
+        "mount": _MOUNT_WORDS.get(extra.get("mount")),
+    }
+
+
 def new_module_extra_get(module_row, key):
     """extra_json[key] for a module_stats row, or None if the row/key is
     absent. Small helper so the fsd-stat lookups above stay readable."""
@@ -1304,7 +1377,7 @@ def _min_max_or_single(lo, hi, ndigits=2):
 
 Run: `pytest tests/test_simulate_module_swap.py -v`
 
-This function is intricate enough that the first run will very likely surface at least one real bug (a wrong join, a `None` not handled) — that's expected and is exactly what this test suite is for. Fix issues in `simulate_module_swap` (not the tests, which encode real verified facts) until all 8 tests pass. Re-run after each fix.
+This function is intricate enough that the first run will very likely surface at least one real bug (a wrong join, a `None` not handled) — that's expected and is exactly what this test suite is for. Fix issues in `simulate_module_swap` (not the tests, which encode real verified facts) until all 9 tests pass. Re-run after each fix.
 
 - [ ] **Step 5: Run the full test suite**
 
@@ -1395,16 +1468,17 @@ In `ellie_chat.py`, add to the `TOOLS` list (same style as the existing 7 entrie
         "type": "function",
         "function": {
             "name": "simulate_module_swap",
-            "description": "'What if I fit a different module' -- swaps one module in the commander's CURRENT ship for a hypothetical one and reports the real resulting mass, jump range, and power changes, or whether it's compatible at all.",
+            "description": "'What if I fit a different module' -- swaps one module in the commander's CURRENT ship for a hypothetical one and reports the real resulting mass, max jump range (unladen, one jump's fuel), and power changes, or whether it's compatible at all.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "module_group": {"type": "string", "description": "e.g. 'frame shift drive', 'power plant', 'shield booster'"},
-                    "module_class": {"type": "integer", "description": "Module class/size, 1-8"},
+                    "module_class": {"type": "integer", "description": "Module class/size, 0-8 (utility mounts such as shield boosters are class 0)"},
                     "module_rating": {"type": "string", "description": "Module rating letter, e.g. 'A'"},
                     "blueprint_name": {"type": "string", "description": "Optional engineering blueprint to apply to the hypothetical module, e.g. 'Increased range'"},
                     "grade": {"type": "integer", "description": "Blueprint grade 1-5, required if blueprint_name is given"},
                     "slot": {"type": "string", "description": "Optional exact slot name, only needed if the ship has more than one slot of that type"},
+                    "variant": {"type": "string", "description": "Optional, only needed when several modules share the same type/class/rating -- e.g. 'gimballed', 'SCO', 'Mk II', 'guardian', or an exact symbol from a previous result's variants list"},
                 },
                 "required": ["module_group", "module_class", "module_rating"],
             },
@@ -1420,12 +1494,13 @@ And to `DISPATCH`:
     "simulate_module_swap": qf.simulate_module_swap,
 ```
 
-- [ ] **Step 4: Tell the model about `unmodeled_blueprint_effects`**
+- [ ] **Step 4: Tell the model about `unmodeled_blueprint_effects` and `variants`**
 
-`simulate_module_swap` can return a real, honestly-reported gap (a blueprint effect it couldn't quantify) — the model needs to relay that, not silently drop it, the same way `SYSTEM_PROMPT` already handles `"found": False`. In `ellie_chat.py`, add one line to `SYSTEM_PROMPT` (next to the existing `"found": false` rule):
+`simulate_module_swap` can return two things the model must handle deliberately: a real, honestly-reported gap (a blueprint effect it couldn't quantify), and an ambiguity (`"found": False` plus a `"variants"` list, when several real modules share the requested type/class/rating). The existing `"found": false` rule would make the model tell the commander "I don't have that data" in the ambiguity case, which is wrong — the data exists, the request just needs narrowing. In `ellie_chat.py`, add two lines to `SYSTEM_PROMPT` (next to the existing `"found": false` rule):
 
 ```python
 - If a tool result has a non-empty "unmodeled_blueprint_effects" list, mention plainly that those specific effects aren't reflected in the numbers -- don't just report the numbers as if they were the whole picture.
+- If a tool result has a "variants" list, the request matched several different real modules -- list them for the commander and ask which one they mean (then call the tool again with `variant`); don't say the data is missing, and don't pick one yourself.
 ```
 
 - [ ] **Step 5: Run tests to verify they pass**
