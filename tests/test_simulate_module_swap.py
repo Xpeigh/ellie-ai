@@ -269,14 +269,31 @@ def test_removed_booster_does_not_contribute_its_bonus(tmp_path):
 
 
 def test_standard_slot_rejects_wrong_group(tmp_path):
-    """R5: a standard slot only ever holds its own group -- life support
-    can't be put into the FSD's slot just because an explicit slot was
-    given."""
+    """R5/NB1/T1, repro F14: a standard slot only ever holds its own group
+    -- life support can't be put into the FSD's slot just because an
+    explicit slot was given. The rejection reason must name the SLOT's
+    real owner (frame shift drive), not the module being swapped in
+    (life support) -- round 2 regressed this and told the commander
+    something false about his ship."""
     _db(tmp_path)
     result = qf.simulate_module_swap(
         module_group="life support", module_class=5, module_rating="D", slot="FrameShiftDrive",
     )
     assert result["compatible"] is False
+    assert result["reason"] == "FrameShiftDrive only takes a frame shift drive"
+
+
+def test_standard_slot_rejects_wrong_group_reverse(tmp_path):
+    """NB1/T1, repro F14b: the mirror of the case above -- an FSD into the
+    LifeSupport slot must name life support (the slot's owner), not frame
+    shift drive (the module being swapped in)."""
+    _db(tmp_path)
+    result = qf.simulate_module_swap(
+        module_group="frame shift drive", module_class=8, module_rating="A",
+        variant="int_hyperdrive_overcharge_size8_class5", slot="LifeSupport",
+    )
+    assert result["compatible"] is False
+    assert result["reason"] == "LifeSupport only takes a life support"
 
 
 def test_explicit_slot_case_insensitive_resolves_to_real_casing(tmp_path):
@@ -400,7 +417,13 @@ def test_core_module_into_internal_slot_is_incompatible(tmp_path):
     standard slots (R5's old, narrower check). Before this round's fix,
     the grp=="fsd" branch treated this hypothetical drive as the ship's
     real FSD and returned compatible: True, mass_change 40.0, new_jump_range
-    8.85 -- confidently wrong numbers for an impossible fit."""
+    8.85 -- confidently wrong numbers for an impossible fit.
+
+    NB1/T1: the reason must name the module being swapped in (frame shift
+    drive), not the internal slot's non-existent "owner" -- round 2's bug
+    was specific to naming the wrong group; this is the "core module in a
+    non-standard slot" branch of that fix, not the "wrong standard slot"
+    branch (that's the reverse test above)."""
     _type9_db(tmp_path)
     result = qf.simulate_module_swap(
         module_group="frame shift drive", module_class=6, module_rating="E",
@@ -408,6 +431,7 @@ def test_core_module_into_internal_slot_is_incompatible(tmp_path):
     )
     assert result["found"] is True
     assert result["compatible"] is False
+    assert result["reason"] == "a frame shift drive only fits the FrameShiftDrive slot"
 
 
 def test_core_module_power_plant_into_internal_slot_is_incompatible(tmp_path):
@@ -421,6 +445,7 @@ def test_core_module_power_plant_into_internal_slot_is_incompatible(tmp_path):
     )
     assert result["found"] is True
     assert result["compatible"] is False
+    assert result["reason"] == "a power plant only fits the PowerPlant slot"
 
 
 def test_fuel_tank_into_undersized_internal_slot_is_incompatible(tmp_path):
@@ -438,7 +463,10 @@ def test_fuel_tank_into_undersized_internal_slot_is_incompatible(tmp_path):
     )
     assert result["found"] is True
     assert result["compatible"] is False
-    assert "4" in result["reason"]
+    # T3: "4" alone is satisfied by the slot name ("Slot05_Size4") even if
+    # the size check were broken -- "max class 4" is only satisfied by the
+    # real reason text.
+    assert "max class 4" in result["reason"]
 
 
 def test_utility_module_into_hardpoint_is_incompatible(tmp_path):
@@ -481,6 +509,10 @@ def test_hardpoint_that_doesnt_exist_on_the_ship_is_incompatible(tmp_path):
     )
     assert result["found"] is True
     assert result["compatible"] is False
+    # T3: `compatible` alone doesn't prove which check caught it -- S1's
+    # kind check would ALSO return compatible: False, with a different
+    # reason. Only S3's existence check produces this text.
+    assert "has no HugeHardpoint1" in result["reason"]
 
 
 def test_unfitted_tiny_hardpoint_beyond_ships_count_is_incompatible(tmp_path):
@@ -495,6 +527,10 @@ def test_unfitted_tiny_hardpoint_beyond_ships_count_is_incompatible(tmp_path):
     )
     assert result["found"] is True
     assert result["compatible"] is False
+    # T3: proves S3's existence check specifically, not just any
+    # compatible: False (S1's kind check can't fire here -- shield
+    # booster is utility kind, TinyHardpoint5 is utility slot kind).
+    assert "has no TinyHardpoint5" in result["reason"]
 
 
 def test_unfitted_internal_slot_that_passes_existence_checks_gets_caveat(tmp_path):
@@ -596,14 +632,86 @@ def test_module_class_out_of_range_fails_cleanly(tmp_path):
 
 
 def test_missing_optmass_stays_none_not_zero(tmp_path):
-    """N6 (latent): if the currently-fitted FSD's base optmass were ever
-    missing, the jump range must come back None, not a near-zero number
-    from routing a None through the NULL->0.0 helper. No real fsd row
-    lacks optmass (Q1), so this exercises the helper directly rather than
-    trying to fabricate a fixture with a genuinely optmass-less FSD."""
-    from query_functions import _engineered_modifier
+    """N6 (latent), strengthened per T3: exercises the REAL path end to
+    end, not just the helper. No real fsd row lacks optmass (Q1), so this
+    directly corrupts the currently-fitted FSD's module_stats.extra_json
+    to remove it, then swaps something ELSE (life support, on the
+    Type-9 fixture, whose FSD carries no journal Engineering block -- so
+    the code must fall back to module_stats' base optmass, not a journal
+    override). new_jump_range must come back None, not a near-zero number
+    from routing that missing optmass through the NULL->0.0 helper that's
+    correct for mass/power but wrong here.
 
-    # The helper this code now uses for FSDOptimalMass never substitutes
-    # 0.0 for a missing value -- unlike _engineered_or_base (still used for
-    # Mass/PowerDraw, where NULL really does mean 0.0).
-    assert _engineered_modifier(None, "FSDOptimalMass") is None
+    Confirmed genuinely RED on revert (see the fix-round-3 report): with
+    the FSDOptimalMass lookup temporarily reverted to route through
+    _engineered_or_base, this test fails with new_jump_range ~= 0.0 in
+    a {"min", "max"} dict, not None."""
+    path = _type9_db(tmp_path)
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT extra_json FROM module_stats WHERE symbol = 'int_hyperdrive_size6_class1'"
+    ).fetchone()
+    extra = json.loads(row["extra_json"])
+    del extra["optmass"]
+    conn.execute(
+        "UPDATE module_stats SET extra_json = ? WHERE symbol = 'int_hyperdrive_size6_class1'",
+        (json.dumps(extra),),
+    )
+    conn.commit()
+    conn.close()
+
+    result = qf.simulate_module_swap(module_group="life support", module_class=5, module_rating="E")
+    assert result["found"] is True
+    assert result["new_jump_range"] is None
+
+
+# ---------------------------------------------------------------------------
+# Fix round 3: T1 (rejection messages name the right group; readable module
+# names, not raw grp codes), T2 (grade validated only when used; whole-
+# number floats accepted), T3 (see the three strengthened tests above).
+# ---------------------------------------------------------------------------
+
+def test_kind_mismatch_reason_uses_readable_name_not_raw_grp_code(tmp_path):
+    """T1: the S1 kind-mismatch reason must never echo a raw grp code back
+    at the commander (e.g. "a sb only fits a utility mount") -- it must
+    read as a real module name ("a shield booster ...")."""
+    _type9_db(tmp_path)
+    result = qf.simulate_module_swap(
+        module_group="sb", module_class=0, module_rating="A",
+        slot="MediumHardpoint2",  # fitted (a pulse laser) on the Type-9 fixture
+    )
+    assert result["compatible"] is False
+    assert "a sb " not in result["reason"]
+    assert "shield booster" in result["reason"]
+
+
+def test_grade_zero_with_no_blueprint_is_ignored(tmp_path):
+    """T2/NB2: grade is only validated when a blueprint is actually
+    requested. A plain swap with grade=0 (a 3B model's plausible way of
+    saying "no grade") must give the exact same result as no grade at
+    all, not a spurious "out of range" rejection."""
+    _db(tmp_path)
+    with_zero = qf.simulate_module_swap(module_group="life support", module_class=5, module_rating="D", grade=0)
+    without = qf.simulate_module_swap(module_group="life support", module_class=5, module_rating="D")
+    assert with_zero == without
+    assert with_zero["found"] is True
+
+
+def test_module_class_as_whole_number_float_matches_int(tmp_path):
+    """T2/NB2: a whole-number float (5.0) must be accepted, giving the
+    same result as the int form."""
+    _db(tmp_path)
+    as_int = qf.simulate_module_swap(module_group="life support", module_class=5, module_rating="D")
+    as_float = qf.simulate_module_swap(module_group="life support", module_class=5.0, module_rating="D")
+    assert as_float == as_int
+    assert as_float["found"] is True
+
+
+def test_module_class_as_fractional_float_fails_cleanly(tmp_path):
+    """T2/NB2: a genuinely fractional value (5.5) is never a valid module
+    class -- rejected with the existing plain reason, never silently
+    truncated or rounded."""
+    _db(tmp_path)
+    result = qf.simulate_module_swap(module_group="life support", module_class=5.5, module_rating="D")
+    assert result["found"] is False

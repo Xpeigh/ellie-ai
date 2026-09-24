@@ -625,32 +625,65 @@ def _module_kind(symbol, grp, module_class):
     return "internal"
 
 
+def _readable_module_name(module_group, grp):
+    """A human-readable name for the module being fitted, for use in a
+    rejection reason (T1) -- never the raw grp code (e.g. "sb", "t"),
+    which reads as gibberish to the commander. STANDARD_GRP_DISPLAY for a
+    core grp; else the caller's own module_group when that's already a
+    recognized friendly name; else the first MODULE_GROUP_TO_GRP key that
+    maps to this grp (covers a caller that passed the raw code)."""
+    if grp in STANDARD_GRP_DISPLAY:
+        return STANDARD_GRP_DISPLAY[grp]
+    if module_group.strip().lower() in MODULE_GROUP_TO_GRP:
+        return module_group
+    for name, g in MODULE_GROUP_TO_GRP.items():
+        if g == grp:
+            return name
+    return module_group
+
+
 def _kind_mismatch_reason(module_group, grp, module_kind, slot_kind, target_slot):
     """None if module_kind is allowed in slot_kind/target_slot (S1's
     "Allowed pairs"), else a plain reason. Runs before variant
     disambiguation and before the size check -- an impossible pairing is
     impossible regardless of which specific variant or how big the slot
-    turns out to be."""
+    turns out to be.
+
+    NB1/T1: a core-module mismatch has TWO separate cases, kept in
+    separate branches so neither can borrow the other's group -- naming
+    the module being swapped IN when the real problem is which SLOT it's
+    going into (or vice versa) tells the commander something false about
+    his ship:
+    - target_slot IS one of the 7 standard slots, just the WRONG one:
+      name that slot's real owner (round 1's R5 case).
+    - target_slot is any other kind entirely (internal/hardpoint/
+      utility): name the module being swapped in -- there's no "wrong
+      standard slot" to blame, it just doesn't belong outside its own."""
     if module_kind == "core":
         if target_slot == STANDARD_SLOT_NAMES[grp]:
             return None
-        return f"{target_slot} only takes a {STANDARD_GRP_DISPLAY.get(grp, grp)}"
+        if slot_kind == "standard":
+            owner_grp = next(g for g, name in STANDARD_SLOT_NAMES.items() if name == target_slot)
+            return f"{target_slot} only takes a {STANDARD_GRP_DISPLAY[owner_grp]}"
+        return f"a {STANDARD_GRP_DISPLAY[grp]} only fits the {STANDARD_SLOT_NAMES[grp]} slot"
+
+    display = _readable_module_name(module_group, grp)
     if module_kind == "fuel tank":
         if slot_kind == "internal" or target_slot == STANDARD_SLOT_NAMES["ft"]:
             return None
-        return f"a {module_group} only fits the standard fuel tank slot or an internal slot"
+        return f"a {display} only fits the standard fuel tank slot or an internal slot"
     if module_kind == "internal":
         if slot_kind == "internal":
             return None
-        return f"a {module_group} only fits an internal slot"
+        return f"a {display} only fits an internal slot"
     if module_kind == "weapon":
         if slot_kind == "hardpoint":
             return None
-        return f"a {module_group} only fits a hardpoint mount"
+        return f"a {display} only fits a hardpoint mount"
     if module_kind == "utility":
         if slot_kind == "utility":
             return None
-        return f"a {module_group} only fits a utility mount"
+        return f"a {display} only fits a utility mount"
     return None
 
 
@@ -771,11 +804,18 @@ def _slot_size_and_existence(conn, ship_row, ship_key, target_slot, slot_kind, o
 
 
 def _coerce_int_in_range(value, lo, hi, label):
-    """Accepts an int or a whole-number string (N4/S5 -- a small model can
-    easily pass module_class="5"); anything else, or an out-of-range
-    value, is a plain reason, never a TypeError from a later comparison."""
+    """Accepts an int, a whole-number float (5.0 -> 5, T2/NB2), or a
+    whole-number string (N4/S5 -- a small model can easily pass
+    module_class="5"); anything else -- a genuinely fractional value like
+    5.5, or unparseable garbage -- or an out-of-range value, is a plain
+    reason, never a TypeError from a later comparison."""
     try:
-        n = int(str(value).strip())
+        if isinstance(value, float):
+            if not value.is_integer():
+                return None, f"'{value}' isn't a valid {label}"
+            n = int(value)
+        else:
+            n = int(str(value).strip())
     except (ValueError, TypeError):
         return None, f"'{value}' isn't a valid {label}"
     if not (lo <= n <= hi):
@@ -938,15 +978,16 @@ def simulate_module_swap(module_group: str, module_class: int, module_rating: st
         return {"found": False, "reason": f"'{module_group}' isn't a recognized module type"}
 
     # N4/S5: a small model can easily pass "5" instead of 5 -- accept
-    # either, reject anything else (or out-of-range) with a plain reason
-    # rather than a TypeError from a later numeric comparison.
+    # either (or a whole-number float, T2/NB2), reject anything else (or
+    # out-of-range) with a plain reason rather than a TypeError from a
+    # later numeric comparison. `grade` is deliberately NOT coerced/
+    # validated here -- it's only meaningful when a blueprint is actually
+    # requested (T2/NB2: a plain swap with grade=0, a 3B model's plausible
+    # way of saying "no grade", must be ignored exactly as it was before
+    # this validation existed, not rejected as "out of range").
     module_class, class_error = _coerce_int_in_range(module_class, 0, 8, "module class")
     if class_error:
         return {"found": False, "reason": class_error}
-    if grade is not None:
-        grade, grade_error = _coerce_int_in_range(grade, 1, 5, "grade")
-        if grade_error:
-            return {"found": False, "reason": grade_error}
 
     conn = _connect()
     try:
@@ -1045,6 +1086,14 @@ def simulate_module_swap(module_group: str, module_class: int, module_rating: st
         unmodeled_keys = []
 
         if blueprint_name:
+            # grade is only validated HERE, not up front (T2/NB2) -- it's
+            # meaningless without a blueprint, so an unvalidated grade=0
+            # from a caller that never asked for a blueprint must be
+            # ignored, not rejected.
+            if grade is not None:
+                grade, grade_error = _coerce_int_in_range(grade, 1, 5, "grade")
+                if grade_error:
+                    return {"found": False, "reason": grade_error}
             if not grade:
                 return {"found": False, "reason": "a blueprint grade (1-5) is required"}
 
