@@ -1494,13 +1494,14 @@ And to `DISPATCH`:
     "simulate_module_swap": qf.simulate_module_swap,
 ```
 
-- [ ] **Step 4: Tell the model about `unmodeled_blueprint_effects` and `variants`**
+- [ ] **Step 4: Tell the model about `unmodeled_blueprint_effects`, `variants` and `caveat`**
 
-`simulate_module_swap` can return two things the model must handle deliberately: a real, honestly-reported gap (a blueprint effect it couldn't quantify), and an ambiguity (`"found": False` plus a `"variants"` list, when several real modules share the requested type/class/rating). The existing `"found": false` rule would make the model tell the commander "I don't have that data" in the ambiguity case, which is wrong — the data exists, the request just needs narrowing. In `ellie_chat.py`, add two lines to `SYSTEM_PROMPT` (next to the existing `"found": false` rule):
+`simulate_module_swap` can return two things the model must handle deliberately: a real, honestly-reported gap (a blueprint effect it couldn't quantify), and an ambiguity (`"found": False` plus a `"variants"` list, when several real modules share the requested type/class/rating). The existing `"found": false` rule would make the model tell the commander "I don't have that data" in the ambiguity case, which is wrong — the data exists, the request just needs narrowing. A third key, `"caveat"`, appears when the swap targets an explicit internal slot that isn't fitted: the journal never lists empty slots, so Ellie can't confirm that slot exists on the ship (fix round 2, S3), and the commander must hear that alongside the numbers. In `ellie_chat.py`, add three lines to `SYSTEM_PROMPT` (next to the existing `"found": false` rule):
 
 ```python
 - If a tool result has a non-empty "unmodeled_blueprint_effects" list, mention plainly that those specific effects aren't reflected in the numbers -- don't just report the numbers as if they were the whole picture.
 - If a tool result has a "variants" list, the request matched several different real modules -- list them for the commander and ask which one they mean (then call the tool again with `variant`); don't say the data is missing, and don't pick one yourself.
+- If a tool result has a "caveat", tell the commander it along with the numbers -- never drop it.
 ```
 
 - [ ] **Step 5: Run tests to verify they pass**
@@ -1555,9 +1556,11 @@ def setup_ship_modules():
     ism.build_schema(conn)
     ship_count = ism.build_ships(conn, str(CORIOLIS_DIR))
     module_count = ism.build_modules(conn, str(CORIOLIS_DIR))
+    blueprint_count = ism.build_module_blueprints(conn, str(CORIOLIS_DIR))
     conn.close()
     print(f"ship_stats: {ship_count} rows")
     print(f"module_stats: {module_count} rows")
+    print(f"module_blueprints: {blueprint_count} rows")
     return True
 ```
 
@@ -1569,7 +1572,7 @@ Add it to `main()`, right after `setup_coriolis()`:
     setup_edsm()
 ```
 
-Add `"Ship/module stats (loadout calculator)": ["ship_stats", "module_stats"]` to the `STEP_TABLES` dict, in the same position (after the Coriolis entry).
+Add `"Ship/module stats (loadout calculator)": ["ship_stats", "module_stats", "module_blueprints"]` to the `STEP_TABLES` dict, in the same position (after the Coriolis entry).
 
 - [ ] **Step 2: Run it for real**
 
