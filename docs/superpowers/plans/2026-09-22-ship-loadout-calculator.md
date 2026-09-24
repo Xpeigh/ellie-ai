@@ -1477,7 +1477,7 @@ In `ellie_chat.py`, add to the `TOOLS` list (same style as the existing 7 entrie
                     "module_rating": {"type": "string", "description": "Module rating letter, e.g. 'A'"},
                     "blueprint_name": {"type": "string", "description": "Optional engineering blueprint to apply to the hypothetical module, e.g. 'Increased range'"},
                     "grade": {"type": "integer", "description": "Blueprint grade 1-5, required if blueprint_name is given"},
-                    "slot": {"type": "string", "description": "Optional exact slot name, only needed if the ship has more than one slot of that type"},
+                    "slot": {"type": "string", "description": "Optional exact slot name, e.g. 'Slot05_Size4' or 'MediumHardpoint2' -- needed if the ship has more than one slot of that type, or to put the module in an empty slot"},
                     "variant": {"type": "string", "description": "Optional, only needed when several modules share the same type/class/rating -- e.g. 'gimballed', 'SCO', 'Mk II', 'guardian', or an exact symbol from a previous result's variants list"},
                 },
                 "required": ["module_group", "module_class", "module_rating"],
@@ -1496,12 +1496,13 @@ And to `DISPATCH`:
 
 - [ ] **Step 4: Tell the model about `unmodeled_blueprint_effects`, `variants` and `caveat`**
 
-`simulate_module_swap` can return two things the model must handle deliberately: a real, honestly-reported gap (a blueprint effect it couldn't quantify), and an ambiguity (`"found": False` plus a `"variants"` list, when several real modules share the requested type/class/rating). The existing `"found": false` rule would make the model tell the commander "I don't have that data" in the ambiguity case, which is wrong — the data exists, the request just needs narrowing. A third key, `"caveat"`, appears when the swap targets an explicit internal slot that isn't fitted: the journal never lists empty slots, so Ellie can't confirm that slot exists on the ship (fix round 2, S3), and the commander must hear that alongside the numbers. In `ellie_chat.py`, add three lines to `SYSTEM_PROMPT` (next to the existing `"found": false` rule):
+`simulate_module_swap` can return two things the model must handle deliberately: a real, honestly-reported gap (a blueprint effect it couldn't quantify), and an ambiguity (`"found": False` plus a `"variants"` list, when several real modules share the requested type/class/rating). The existing `"found": false` rule would make the model tell the commander "I don't have that data" in the ambiguity case, which is wrong — the data exists, the request just needs narrowing. A third key, `"caveat"`, appears when the swap targets an explicit internal slot that isn't fitted: the journal never lists empty slots, so Ellie can't confirm that slot exists on the ship (fix round 2, S3), and the commander must hear that alongside the numbers. In `ellie_chat.py`, add four lines to `SYSTEM_PROMPT` (next to the existing `"found": false` rule). The fourth exists because `simulate_module_swap` also uses `"found": false` + `"reason"` to ask for a missing detail ("specify which slot", "a blueprint grade (1-5) is required"), which the existing rule would misreport as missing data:
 
 ```python
 - If a tool result has a non-empty "unmodeled_blueprint_effects" list, mention plainly that those specific effects aren't reflected in the numbers -- don't just report the numbers as if they were the whole picture.
 - If a tool result has a "variants" list, the request matched several different real modules -- list them for the commander and ask which one they mean (then call the tool again with `variant`); don't say the data is missing, and don't pick one yourself.
 - If a tool result has a "caveat", tell the commander it along with the numbers -- never drop it.
+- If a "found": false result has a "reason", pass that reason on in plain words -- it may be asking for a detail (like which slot) rather than saying the data is missing.
 ```
 
 - [ ] **Step 5: Run tests to verify they pass**
