@@ -70,26 +70,11 @@ STANDARD_GRP_DISPLAY = {
 # ship file in coriolis-data/ships/*.json.
 STANDARD_SLOTS_ORDER = ["pp", "t", "fsd", "ls", "pd", "s", "ft"]
 
-# grp -> the exact Coriolis `applies_to` token(s) (lowercased) a blueprint's
-# modulename list must contain for it to apply to that group. Replaces a
-# substring match against arbitrary text (that let "t" match inside
-# "shift" and "pp" match inside "support") with a whole-token comparison
-# against the real, complete set of applies_to values in
-# modifications/blueprints.json. A grp absent here has no Coriolis
-# blueprint coverage at all (ft, mrp, crl, dc, fh, gfsb) -- not an
-# oversight, there simply are no blueprints for it.
-GRP_TO_BLUEPRINT_CATEGORIES = {
-    "fsd": ["frame shift drive"], "pp": ["power plant"], "pd": ["power distributor"],
-    "t": ["thrusters"], "ls": ["life support"], "s": ["sensors"],
-    "sg": ["shield generator"], "bsg": ["shield generator"], "psg": ["shield generator"],
-    "scb": ["shield cell bank"], "sb": ["shield booster"], "hr": ["hull reinforcement"],
-    "cr": ["expanded capacity cargo rack"], "fs": ["fuel scoop"],
-    "am": ["auto field mainentance unit"],   # Coriolis's own spelling, verbatim
-    "rf": ["refinery"],
-    "bl": ["weapon"], "ul": ["weapon"], "pl": ["weapon"], "c": ["weapon"], "mc": ["weapon"],
-    "fc": ["weapon"], "rg": ["weapon"], "pa": ["weapon"], "nl": ["weapon"], "mr": ["weapon"], "tp": ["weapon"],
-    "ch": ["chaff launcher"], "hs": ["heat sink launcher"], "po": ["point defence"],
-}
+# The 6 standard grps that are "core" modules for slot-kind purposes (S1)
+# -- fuel tank (ft) is deliberately excluded: it's the one standard group
+# that can ALSO be fitted in an ordinary internal slot, so it gets its own
+# "fuel tank" kind rather than "core".
+_CORE_GRPS = {"pp", "t", "fsd", "ls", "pd", "s"}
 
 # journal current_loadout.ship_key -> ship_stats.ship_key, for the ships
 # where the journal's internal name doesn't match Coriolis's directly.
@@ -107,8 +92,12 @@ JOURNAL_SHIP_TO_CORIOLIS = {
     "type9": "type_9_heavy",
 }
 
-_OPTIONAL_INTERNAL_SLOT_RE = re.compile(r"^Slot\d+_Size(\d+)$", re.IGNORECASE)
-_HARDPOINT_SLOT_RE = re.compile(r"^(Tiny|Small|Medium|Large|Huge)(?:Mining)?Hardpoint\d+$", re.IGNORECASE)
+# NN and M both captured -- S3's internal-slot existence checks need the
+# slot NUMBER (NN), not just its advertised size (M).
+_OPTIONAL_INTERNAL_SLOT_RE = re.compile(r"^Slot(\d+)_Size(\d+)$", re.IGNORECASE)
+# Size word and index N both captured -- S1 splits Tiny (utility kind) from
+# Small/Medium/Large/Huge (hardpoint kind); S3's existence check needs N.
+_HARDPOINT_SLOT_RE = re.compile(r"^(Tiny|Small|Medium|Large|Huge)(?:Mining)?Hardpoint(\d+)$", re.IGNORECASE)
 _HARDPOINT_MAX_CLASS = {"tiny": 0, "small": 1, "medium": 2, "large": 3, "huge": 4}
 
 # On-item name patterns that draw no power at all and are never in
@@ -605,43 +594,193 @@ def _resolve_ship_stats(conn, ship_key):
     return conn.execute("SELECT * FROM ship_stats WHERE lower(ship_key) = lower(?)", (mapped,)).fetchone()
 
 
-def _slot_max_class(conn, ship_key, grp, target_slot, old_stats):
-    """The largest module class target_slot can hold, or (None, reason)
-    when that can't be determined -- R6 requires failing closed rather
-    than ever claiming a fit that wasn't actually checked.
-
-    - Standard slots: ship_stats.slots_json["standard"], indexed by
-      STANDARD_SLOTS_ORDER (verified: 12,068 real-loadout checks, 0
-      violations).
-    - Optional internal SlotNN_SizeM: M, or the class of whatever's
-      currently fitted there if that's larger (the one real exception --
-      the Keelback's Slot03_Size3 holding a class-4 cargo rack -- falls
-      out of this generic rule, no special-casing needed).
-    - Hardpoints (Tiny|Small|Medium|Large|Huge)(Mining)?HardpointN: a
-      fixed size-word -> class mapping (verified: 3,020 checks, 0
-      violations).
-    """
-    if grp in STANDARD_SLOT_NAMES:
-        ship_row = _resolve_ship_stats(conn, ship_key)
-        if not ship_row:
-            return None, f"don't know {ship_key}'s slot layout, so the fit can't be checked"
-        standard_sizes = json.loads(ship_row["slots_json"]).get("standard") or []
-        if len(standard_sizes) != len(STANDARD_SLOTS_ORDER):
-            return None, f"don't know {ship_key}'s standard slot sizes, so the fit can't be checked"
-        return standard_sizes[STANDARD_SLOTS_ORDER.index(grp)], None
-
-    m = _OPTIONAL_INTERNAL_SLOT_RE.match(target_slot)
-    if m:
-        max_class = int(m.group(1))
-        if old_stats and old_stats["class"] and old_stats["class"] > max_class:
-            max_class = old_stats["class"]
-        return max_class, None
-
+def _classify_slot_kind(target_slot):
+    """Which of the 4 recognized slot kinds target_slot is, or None for
+    "anything else" (Military01, Cargo01, LimpetController01, FighterBay01,
+    PlanetaryApproachSuite, Armour, ShipCockpit, CargoHatch, cosmetics, ...)
+    -- those are a later extension (S1), never guessed at here. Names are
+    already case-corrected by the time this is called (R5)."""
+    if target_slot in STANDARD_SLOT_NAMES.values():
+        return "standard"
     m = _HARDPOINT_SLOT_RE.match(target_slot)
     if m:
-        return _HARDPOINT_MAX_CLASS[m.group(1).lower()], None
+        return "utility" if m.group(1).lower() == "tiny" else "hardpoint"
+    if _OPTIONAL_INTERNAL_SLOT_RE.match(target_slot):
+        return "internal"
+    return None
 
-    return None, f"don't recognize '{target_slot}''s size, so the fit can't be checked"
+
+def _module_kind(symbol, grp, module_class):
+    """Which of the 5 recognized module kinds a candidate module is,
+    from its symbol prefix and class alone (S1) -- verified across all of
+    module_stats: every hpt_ grp is consistently class-0-only (utility) or
+    class->=1-only (weapon), so every candidate for one grp shares a kind,
+    and this can be taken before any variant disambiguation."""
+    if symbol.lower().startswith("hpt_"):
+        return "utility" if module_class == 0 else "weapon"
+    if grp in _CORE_GRPS:
+        return "core"
+    if grp == "ft":
+        return "fuel tank"
+    return "internal"
+
+
+def _kind_mismatch_reason(module_group, grp, module_kind, slot_kind, target_slot):
+    """None if module_kind is allowed in slot_kind/target_slot (S1's
+    "Allowed pairs"), else a plain reason. Runs before variant
+    disambiguation and before the size check -- an impossible pairing is
+    impossible regardless of which specific variant or how big the slot
+    turns out to be."""
+    if module_kind == "core":
+        if target_slot == STANDARD_SLOT_NAMES[grp]:
+            return None
+        return f"{target_slot} only takes a {STANDARD_GRP_DISPLAY.get(grp, grp)}"
+    if module_kind == "fuel tank":
+        if slot_kind == "internal" or target_slot == STANDARD_SLOT_NAMES["ft"]:
+            return None
+        return f"a {module_group} only fits the standard fuel tank slot or an internal slot"
+    if module_kind == "internal":
+        if slot_kind == "internal":
+            return None
+        return f"a {module_group} only fits an internal slot"
+    if module_kind == "weapon":
+        if slot_kind == "hardpoint":
+            return None
+        return f"a {module_group} only fits a hardpoint mount"
+    if module_kind == "utility":
+        if slot_kind == "utility":
+            return None
+        return f"a {module_group} only fits a utility mount"
+    return None
+
+
+def _entry_class(entry):
+    """A ship_stats slots_json hardpoints/internal entry's class -- a
+    plain int, or a dict with a "class" key (a reserved/named slot)."""
+    return entry if isinstance(entry, int) else entry.get("class")
+
+
+def _hardpoint_slot_exists(ship_row, size_word, index):
+    """S3: does the ship really have an Nth hardpoint of this size? Counts
+    EVERY entry of that class in slots_json["hardpoints"], named or plain
+    -- a reserved/named hardpoint still occupies a real slot of that size
+    (verified: 3,021 real hardpoint slots, 0 violations)."""
+    hardpoints = json.loads(ship_row["slots_json"]).get("hardpoints") or []
+    target_class = _HARDPOINT_MAX_CLASS[size_word]
+    count = sum(1 for e in hardpoints if _entry_class(e) == target_class)
+    return index <= count
+
+
+def _largest_plain_internal_class(ship_row):
+    """S3(b): the largest ordinary (non-reserved) internal slot on this
+    ship. Plain entries are ints, or dicts WITHOUT a "name" key -- named
+    entries (Military, Cargo, Limpets, Fighter, PlanetaryApproachSuite)
+    are reserved slots addressed by their own journal slot name, not by
+    SlotNN_SizeM. Verified: 0 violations in 12,764 real internal slots."""
+    internal = json.loads(ship_row["slots_json"]).get("internal") or []
+    plain = [_entry_class(e) for e in internal if isinstance(e, int) or "name" not in e]
+    return max(plain) if plain else None
+
+
+def _internal_slot_collision(conn, nn):
+    """S3(a): if a FITTED internal slot shares this NN under a different
+    name, that fitted name is the real one -- the requested SlotNN_SizeM
+    is wrong, not just unfitted. Verified: 0 repeated NN within one real
+    loadout, across 12,764 internal slots."""
+    for row in conn.execute("SELECT slot FROM current_loadout_modules").fetchall():
+        m = _OPTIONAL_INTERNAL_SLOT_RE.match(row["slot"])
+        if m and int(m.group(1)) == nn:
+            return row["slot"]
+    return None
+
+
+def _slot_size_and_existence(conn, ship_row, ship_key, target_slot, slot_kind, old_module_row, old_stats):
+    """The largest module class target_slot can hold, PLUS (for an
+    explicit slot that isn't currently fitted) whether it plausibly
+    exists at all (S3). Returns (max_class, caveat, early_return):
+    early_return is a result dict to return immediately when set;
+    otherwise max_class/caveat are valid and the caller proceeds.
+    caveat is True only on the one path where existence was inferred,
+    not confirmed (an unfitted internal slot that passed both checks).
+
+    - Standard slots: sized from the slot's OWN owner grp (reverse
+      STANDARD_SLOT_NAMES lookup), never from the swap's `grp` -- S2
+      requires this to hold even if S1's kind check were absent. A
+      standard slot always exists by definition, no S3 check needed.
+      (Verified: 12,068 real-loadout checks, 0 violations.)
+    - Hardpoint/utility, fitted: sized by the slot's own size word.
+    - Hardpoint/utility, NOT fitted: S3 checks the ship really has an
+      Nth hardpoint of that size before sizing it.
+    - Internal, fitted: M, or the fitted module's class if that's larger
+      (the one real exception -- the Keelback's Slot03_Size3 holding a
+      class-4 cargo rack -- falls out of this generic rule).
+    - Internal, NOT fitted: S3's number-collision and plain-max-size
+      checks (Review Focus #2 -- empty internal slots aren't otherwise
+      verifiable at all); passing both adds the caveat.
+    """
+    if slot_kind == "standard":
+        owner_grp = next(g for g, name in STANDARD_SLOT_NAMES.items() if name == target_slot)
+        if not ship_row:
+            return None, False, {"found": False, "reason": f"don't know {ship_key}'s slot layout, so the fit can't be checked"}
+        standard_sizes = json.loads(ship_row["slots_json"]).get("standard") or []
+        if len(standard_sizes) != len(STANDARD_SLOTS_ORDER):
+            return None, False, {"found": False, "reason": f"don't know {ship_key}'s standard slot sizes, so the fit can't be checked"}
+        return standard_sizes[STANDARD_SLOTS_ORDER.index(owner_grp)], False, None
+
+    if slot_kind in ("hardpoint", "utility"):
+        m = _HARDPOINT_SLOT_RE.match(target_slot)
+        size_word, index = m.group(1).lower(), int(m.group(2))
+        max_class = _HARDPOINT_MAX_CLASS[size_word]
+        if not old_module_row:
+            if not ship_row:
+                return None, False, {"found": False, "reason": f"don't know {ship_key}'s hardpoint layout, so the fit can't be checked"}
+            if not _hardpoint_slot_exists(ship_row, size_word, index):
+                ship_name = ship_row["name"] or ship_key
+                return None, False, {
+                    "found": True, "compatible": False, "slot": target_slot,
+                    "reason": f"your {ship_name} has no {target_slot}",
+                }
+        return max_class, False, None
+
+    if slot_kind == "internal":
+        m = _OPTIONAL_INTERNAL_SLOT_RE.match(target_slot)
+        nn, size_m = int(m.group(1)), int(m.group(2))
+        if old_module_row:
+            max_class = size_m
+            if old_stats and old_stats["class"] and old_stats["class"] > max_class:
+                max_class = old_stats["class"]
+            return max_class, False, None
+
+        collision = _internal_slot_collision(conn, nn)
+        if collision:
+            return None, False, {"found": False, "reason": f"your ship's slot {nn} is {collision}"}
+        if not ship_row:
+            return None, False, {"found": False, "reason": f"don't know {ship_key}'s internal slot layout, so the fit can't be checked"}
+        largest_plain = _largest_plain_internal_class(ship_row)
+        if largest_plain is None:
+            return None, False, {"found": False, "reason": f"don't know {ship_key}'s internal slot layout, so the fit can't be checked"}
+        if size_m > largest_plain:
+            ship_name = ship_row["name"] or ship_key
+            return None, False, {
+                "found": True, "compatible": False, "slot": target_slot,
+                "reason": f"your {ship_name} has no size-{size_m} internal slot",
+            }
+        return size_m, True, None  # caveat: existence inferred, not confirmed
+
+    return None, False, {"found": False, "reason": f"don't recognize '{target_slot}''s size, so the fit can't be checked"}
+
+
+def _coerce_int_in_range(value, lo, hi, label):
+    """Accepts an int or a whole-number string (N4/S5 -- a small model can
+    easily pass module_class="5"); anything else, or an out-of-range
+    value, is a plain reason, never a TypeError from a later comparison."""
+    try:
+        n = int(str(value).strip())
+    except (ValueError, TypeError):
+        return None, f"'{value}' isn't a valid {label}"
+    if not (lo <= n <= hi):
+        return None, f"{label} {n} is out of range ({lo}-{hi})"
+    return n, None
 
 
 def _engineered_modifier(modifiers_json, label):
@@ -752,15 +891,18 @@ def _power_draw_total(conn, target_slot):
     return total, unknown
 
 
-def _effective_plant_output(conn, grp, new_module, features):
+def _effective_plant_output(conn, target_slot, new_module, features):
     """(min, max) power plant output in MW. If the plant itself is being
-    swapped, that's the new module's pgen (+ the blueprint's pgen delta,
-    if one applies); otherwise it's the CURRENTLY fitted plant's real
-    reported output -- the journal's own PowerCapacity if it's engineered
-    (ground truth), else its base module_stats pgen. Returns (None, None)
-    when the currently-fitted plant can't be resolved at all, so the
-    caller reports an honestly-unknown margin instead of a guess."""
-    if grp == "pp":
+    swapped (the TARGET SLOT is the standard PowerPlant slot -- S2: keyed
+    on the slot, not on `grp`, so this stays correct even if a kind-check
+    elsewhere had a gap), that's the new module's pgen (+ the blueprint's
+    pgen delta, if one applies); otherwise it's the CURRENTLY fitted
+    plant's real reported output -- the journal's own PowerCapacity if
+    it's engineered (ground truth), else its base module_stats pgen.
+    Returns (None, None) when the currently-fitted plant can't be
+    resolved at all, so the caller reports an honestly-unknown margin
+    instead of a guess."""
+    if target_slot == STANDARD_SLOT_NAMES["pp"]:
         base = new_module_extra_get(new_module, "pgen") or 0.0
         if "pgen" in features:
             return apply_blueprint_delta(base, features["pgen"])
@@ -787,12 +929,24 @@ def simulate_module_swap(module_group: str, module_class: int, module_rating: st
     """'What if I fit X instead' -- swaps one module in the commander's
     CURRENT loadout for a hypothetical one and reports the real resulting
     mass/jump-range/power deltas. Never invents a number: an
-    unrecognized module group, an incompatible class/rating, or a
-    blueprint that doesn't apply to this module category all return a
-    plain not-found/incompatible result instead."""
+    unrecognized module group, an incompatible class/rating, an
+    impossible slot/module pairing, or a blueprint that doesn't apply to
+    this module category all return a plain not-found/incompatible
+    result instead."""
     grp = _module_group_to_grp(module_group)
     if grp is None:
         return {"found": False, "reason": f"'{module_group}' isn't a recognized module type"}
+
+    # N4/S5: a small model can easily pass "5" instead of 5 -- accept
+    # either, reject anything else (or out-of-range) with a plain reason
+    # rather than a TypeError from a later numeric comparison.
+    module_class, class_error = _coerce_int_in_range(module_class, 0, 8, "module class")
+    if class_error:
+        return {"found": False, "reason": class_error}
+    if grade is not None:
+        grade, grade_error = _coerce_int_in_range(grade, 1, 5, "grade")
+        if grade_error:
+            return {"found": False, "reason": grade_error}
 
     conn = _connect()
     try:
@@ -804,26 +958,39 @@ def simulate_module_swap(module_group: str, module_class: int, module_rating: st
         if slot_error:
             return {"found": False, "reason": slot_error}
 
-        # A standard slot only ever holds its own group (R5) -- this can only
-        # trigger from an explicit `slot`, since the resolution above never
-        # returns a standard name for the wrong grp on its own.
-        if target_slot in STANDARD_SLOT_NAMES.values() and STANDARD_SLOT_NAMES.get(grp) != target_slot:
-            owner_grp = next(g for g, name in STANDARD_SLOT_NAMES.items() if name == target_slot)
-            return {
-                "found": True, "compatible": False, "slot": target_slot,
-                "reason": f"{target_slot} only takes a {STANDARD_GRP_DISPLAY.get(owner_grp, owner_grp)}",
-            }
+        # S1: classify the target slot by name. "Anything else" (Military01,
+        # Cargo01, LimpetController01, FighterBay01, PlanetaryApproachSuite,
+        # Armour, ShipCockpit, CargoHatch, cosmetics, ...) is a later
+        # extension -- fail closed exactly as an unrecognized slot size did
+        # before this, never guess.
+        slot_kind = _classify_slot_kind(target_slot)
+        if slot_kind is None:
+            return {"found": False, "reason": f"Ellie can't simulate swaps in {target_slot} yet"}
 
         # Several real modules can share one group/class/rating (standard vs SCO
         # FSDs, fixed/gimballed/turret mounts, standard vs Guardian power plants
         # -- 100 such combinations in coriolis-data, verified). Their stats differ
         # materially, so never pick one arbitrarily: narrow by `variant` if given,
         # otherwise list the candidates and ask, the same honest treatment an
-        # ambiguous slot gets.
-        candidates = conn.execute(
+        # ambiguous slot gets. raw_candidates (before the variant filter) is
+        # also what S1's kind check uses -- every candidate for one grp shares
+        # a kind, so this is valid before any variant disambiguation.
+        raw_candidates = conn.execute(
             "SELECT * FROM module_stats WHERE grp = ? AND class = ? AND lower(rating) = lower(?)",
             (grp, module_class, module_rating),
         ).fetchall()
+
+        # S1: does this module kind even fit this slot kind? Runs before the
+        # variants ambiguity response and before the size check -- "a beam
+        # laser in an internal slot" is wrong whichever mount is meant, so
+        # don't make the user pick a mount first.
+        if raw_candidates:
+            module_kind = _module_kind(raw_candidates[0]["symbol"], grp, module_class)
+            mismatch = _kind_mismatch_reason(module_group, grp, module_kind, slot_kind, target_slot)
+            if mismatch:
+                return {"found": True, "compatible": False, "slot": target_slot, "reason": mismatch}
+
+        candidates = raw_candidates
         if variant:
             wanted = variant.strip().lower()
             exact = [c for c in candidates if c["symbol"] == wanted]
@@ -854,9 +1021,17 @@ def simulate_module_swap(module_group: str, module_class: int, module_rating: st
                 "reason": f"the module currently in {target_slot} ({old_module_row['item']}) isn't in Ellie's module data, so the change can't be computed",
             }
 
-        max_class, size_reason = _slot_max_class(conn, baseline["ship_key"], grp, target_slot, old_stats)
-        if max_class is None:
-            return {"found": False, "reason": size_reason}
+        # S2/S3: size the slot from the SLOT, not from `grp` -- and, for an
+        # explicit slot that isn't currently fitted, check it plausibly
+        # exists at all (Review Focus #2's scope note: empty slots are
+        # otherwise unverifiable). caveat is True only when existence was
+        # inferred rather than confirmed (an unfitted internal slot).
+        ship_row = _resolve_ship_stats(conn, baseline["ship_key"])
+        max_class, caveat, early_return = _slot_size_and_existence(
+            conn, ship_row, baseline["ship_key"], target_slot, slot_kind, old_module_row, old_stats
+        )
+        if early_return:
+            return early_return
         if module_class > max_class:
             return {
                 "found": True, "compatible": False, "slot": target_slot,
@@ -872,33 +1047,36 @@ def simulate_module_swap(module_group: str, module_class: int, module_rating: st
         if blueprint_name:
             if not grade:
                 return {"found": False, "reason": "a blueprint grade (1-5) is required"}
-            if grp not in GRP_TO_BLUEPRINT_CATEGORIES:
+
+            # S4: eligibility comes from Coriolis's own per-group allow-list
+            # (modifications/modules.json, ingested into module_blueprints by
+            # ingest_ship_modules.py), NOT a category-text match -- Coriolis's
+            # applies_to text is far coarser than which blueprints actually
+            # exist for a group (e.g. "Weapon" covers every weapon grp, but a
+            # torpedo pylon only really has LightWeight/Sturdy; a multi-cannon
+            # and a beam laser can both match "Overcharged" under two DIFFERENT,
+            # differently-featured blueprint definitions).
+            allow_list_count = conn.execute(
+                "SELECT COUNT(*) FROM module_blueprints WHERE grp = ?", (grp,)
+            ).fetchone()[0]
+            if allow_list_count == 0:
                 return {"found": False, "reason": f"no engineering blueprints exist for {module_group} in Ellie's data"}
 
-            # Whole-token match against Coriolis's own applies_to text (R4) --
-            # NOT a substring match: "t" is a substring of "shift", "pp" is a
-            # substring of "su-pp-ort", so a raw grp code or short friendly
-            # name could false-positive-match an unrelated category's text.
-            # blueprint_mapping.MODULE_TO_CORIOLIS_KEYWORDS is NOT reused here
-            # either -- checked its actual keys while writing this plan, and it
-            # only covers hardpoints/optional-internals/utility modules, not
-            # core internals like the FSD or power plant.
-            own_categories = {c.lower() for c in GRP_TO_BLUEPRINT_CATEGORIES[grp]}
-            bp_candidates = conn.execute(
-                "SELECT applies_to, feature_ranges_json FROM coriolis_blueprints "
-                "WHERE grade = ? AND lower(upgrade_name) = lower(?)",
-                (grade, blueprint_name),
+            bp_rows = conn.execute(
+                "SELECT cb.fdname, cb.feature_ranges_json FROM coriolis_blueprints cb "
+                "JOIN module_blueprints mb ON mb.fdname = cb.fdname "
+                "WHERE mb.grp = ? AND cb.grade = ? AND lower(cb.upgrade_name) = lower(?)",
+                (grp, grade, blueprint_name),
             ).fetchall()
-            match = None
-            for c in bp_candidates:
-                tokens = {t.strip().lower() for t in c["applies_to"].split(",")}
-                if tokens & own_categories:
-                    match = c
-                    break
-            if not match:
+            if not bp_rows:
                 return {"found": False, "reason": f"'{blueprint_name}' grade {grade} doesn't apply to {module_group}"}
+            if len(bp_rows) > 1:
+                # Never take the first row. Not reachable with today's data
+                # (verified: 0 upgrade_name collisions within any grp's
+                # allow-list at any grade) -- this guards future data.
+                return {"found": False, "reason": f"multiple blueprint definitions match '{blueprint_name}' grade {grade} for {module_group} -- Ellie's data needs a closer look before this can be applied safely"}
 
-            features = json.loads(match["feature_ranges_json"])
+            features = json.loads(bp_rows[0]["feature_ranges_json"])
             applied_keys = set()
             if "mass" in features:
                 new_mass_min, new_mass_max = apply_blueprint_delta(new_module["mass"] or 0.0, features["mass"])
@@ -906,9 +1084,9 @@ def simulate_module_swap(module_group: str, module_class: int, module_rating: st
             if "power" in features:
                 new_power_min, new_power_max = apply_blueprint_delta(new_module["power"] or 0.0, features["power"])
                 applied_keys.add("power")
-            if grp == "fsd" and "optmass" in features:
+            if target_slot == STANDARD_SLOT_NAMES["fsd"] and "optmass" in features:
                 applied_keys.add("optmass")  # applied separately below, in the jump-range section
-            if grp == "pp" and "pgen" in features:
+            if target_slot == STANDARD_SLOT_NAMES["pp"] and "pgen" in features:
                 applied_keys.add("pgen")  # applied separately below, in the power-margin section
             blueprint_note = blueprint_name
             # honesty check: a features key this code doesn't know how to apply
@@ -934,11 +1112,13 @@ def simulate_module_swap(module_group: str, module_class: int, module_rating: st
         power_change_max = new_power_max - old_power
 
         # jump range needs the ship's EFFECTIVE fsd stats -- if the FSD itself
-        # is the slot being swapped, that's the new module (+ blueprint, if
-        # given); otherwise it's the CURRENT fsd's real reported stats
-        # (preferring the journal's own engineering values over recomputed
-        # blueprint math -- see Global Constraints).
-        if grp == "fsd":
+        # is the slot being swapped (S2: keyed on the TARGET SLOT, not `grp`
+        # -- after S1 the two agree, but the slot is what's actually true,
+        # and this doesn't depend on S1 being in place), that's the new
+        # module (+ blueprint, if given); otherwise it's the CURRENT fsd's
+        # real reported stats (preferring the journal's own engineering
+        # values over recomputed blueprint math -- see Global Constraints).
+        if target_slot == STANDARD_SLOT_NAMES["fsd"]:
             fsd_optmass = new_module_extra_get(new_module, "optmass")
             fsd_maxfuel = new_module_extra_get(new_module, "maxfuel")
             fsd_fuelmul = new_module_extra_get(new_module, "fuelmul")
@@ -957,17 +1137,22 @@ def simulate_module_swap(module_group: str, module_class: int, module_rating: st
             fsd_maxfuel = new_module_extra_get(fsd_row, "maxfuel") if fsd_row else None
             fsd_fuelmul = new_module_extra_get(fsd_row, "fuelmul") if fsd_row else None
             fsd_fuelpower = new_module_extra_get(fsd_row, "fuelpower") if fsd_row else None
-            optmass_min = optmass_max = _engineered_or_base(
-                fsd_row["engineering_modifiers_json"] if fsd_row else None, "FSDOptimalMass", base_optmass
-            ) if fsd_row else base_optmass
+            # N6: a missing base optmass must stay None (-> an honest "unknown
+            # jump range" below), never get routed through the NULL->0.0 rule
+            # that's correct for mass/power but wrong here -- a ~0 optmass
+            # would give a jump range of ~0, not "unknown".
+            engineered_optmass = _engineered_modifier(fsd_row["engineering_modifiers_json"], "FSDOptimalMass") if fsd_row else None
+            optmass_min = optmass_max = engineered_optmass if engineered_optmass is not None else base_optmass
 
         # Guardian FSD Booster: a flat additive jump-range bonus (loadout_calc.compute_jump_range's
         # booster_bonus parameter -- see that function's own docstring for the honest caveat that
         # this addition, unlike the base formula, isn't cross-verified against a real boosted ship).
-        # Resolved the same way as the effective FSD stats above: if the booster ITSELF is the slot
-        # being swapped, use the new module's jumpboost; otherwise use whatever booster (if any) is
-        # currently fitted EXCLUDING the target slot (R5) -- a booster being removed contributes
-        # nothing, even though its row is still in current_loadout_modules until this swap happens.
+        # Stays keyed on `grp` (S2): a booster works from any internal slot, so there's no separate
+        # "target slot" to prefer here. Resolved the same way as the effective FSD stats above: if
+        # the booster ITSELF is the slot being swapped, use the new module's jumpboost; otherwise use
+        # whatever booster (if any) is currently fitted EXCLUDING the target slot (R5) -- a booster
+        # being removed contributes nothing, even though its row is still in current_loadout_modules
+        # until this swap happens.
         if grp == "gfsb":
             booster_bonus = new_module_extra_get(new_module, "jumpboost") or 0.0
         else:
@@ -989,7 +1174,7 @@ def simulate_module_swap(module_group: str, module_class: int, module_rating: st
         # the new module's draw added instead), hardpoints and the cargo
         # hatch's flat 0.6 MW included. An On module this code can't identify
         # makes the margin honestly unknown, never a guess.
-        plant_output_min, plant_output_max = _effective_plant_output(conn, grp, new_module, features)
+        plant_output_min, plant_output_max = _effective_plant_output(conn, target_slot, new_module, features)
         draw_total, unknown_power_items = _power_draw_total(conn, target_slot)
         if plant_output_min is None or unknown_power_items:
             new_power_margin = None
@@ -998,7 +1183,7 @@ def simulate_module_swap(module_group: str, module_class: int, module_rating: st
             margin_max = plant_output_max - (draw_total + new_power_min)
             new_power_margin = _min_max_or_single(margin_min, margin_max)
 
-        return {
+        result = {
             "found": True,
             "compatible": True,
             "slot": target_slot,
@@ -1017,5 +1202,13 @@ def simulate_module_swap(module_group: str, module_class: int, module_rating: st
             "power_unknown_modules": unknown_power_items,  # honestly-reported, never silently dropped
             "unmodeled_blueprint_effects": unmodeled_keys,  # honestly-reported, never silently dropped
         }
+        if caveat:
+            # S3(c): only on the "unfitted internal slot, existence inferred
+            # not confirmed" path -- Task 6 relays this to the model.
+            result["caveat"] = (
+                f"{target_slot} isn't fitted in your current loadout, so Ellie can't confirm "
+                "it's an empty slot on your ship -- these numbers assume it is"
+            )
+        return result
     finally:
         conn.close()

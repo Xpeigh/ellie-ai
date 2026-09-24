@@ -48,6 +48,7 @@ def _base_db(tmp_path):
     ism.build_schema(conn)
     ism.build_ships(conn, str(REPO))
     ism.build_modules(conn, str(REPO))
+    ism.build_module_blueprints(conn, str(REPO))
     ic.build_schema(conn)
     ic.ingest_blueprints(conn, json.load(open(REPO / "modifications" / "blueprints.json")))
     ic.ingest_specials(conn, json.load(open(REPO / "modifications" / "specials.json")))
@@ -177,13 +178,21 @@ def test_blueprint_effect_this_code_cant_apply_is_reported_not_dropped(tmp_path)
 def test_blueprint_category_whole_token_rejects_false_substring_thrusters(tmp_path):
     """C4/R4: "t" (thrusters' raw grp code) is a substring of "shift", so a
     naive substring match against "Frame shift drive, FSD" would wrongly
-    apply an FSD blueprint to thrusters. The whole-token match must not."""
+    apply an FSD blueprint to thrusters. The whole-token match must not.
+
+    N5: thrusters 5A is ITSELF ambiguous (int_engine_size5_class5 vs
+    int_mkiiagileboost_engine_size5_class5) -- without `variant` the call
+    fails on that ambiguity before ever reaching the blueprint check, which
+    would make this test pass for the wrong reason. `variant` pins it to
+    the blueprint-category check specifically."""
     _db(tmp_path)
     result = qf.simulate_module_swap(
         module_group="t", module_class=5, module_rating="A",
+        variant="int_engine_size5_class5",
         blueprint_name="Increased range", grade=1,
     )
     assert result["found"] is False
+    assert "doesn't apply" in result["reason"]
 
 
 def test_blueprint_category_whole_token_rejects_false_substring_power_plant(tmp_path):
@@ -203,12 +212,16 @@ def test_blueprint_category_whole_token_rejects_false_substring_power_plant(tmp_
 def test_weapon_blueprint_applies_and_reports_unmodeled_effects(tmp_path):
     """I2: applies_to for weapons is just "Weapon" -- a category match
     keyed off the friendly module_group text ("beam laser") would always
-    miss it. SmallHardpoint1 is empty on the fixture ship, which is fine
-    with an explicit slot; its maximum is class 1 by name."""
+    miss it. MediumHardpoint1 is empty on the fixture ship, which is fine
+    with an explicit slot (S3 confirms the ship really has one -- explorer_nx
+    has 6 real Medium hardpoints, verified against coriolis-data; it has
+    ZERO Small hardpoints, so a class-1 weapon must go somewhere bigger).
+    Its maximum is class 2 by name, and a class-1 weapon fits a
+    same-or-bigger slot."""
     _db(tmp_path)
     result = qf.simulate_module_swap(
         module_group="beam laser", module_class=1, module_rating="E",
-        variant="hpt_beamlaser_fixed_small", slot="SmallHardpoint1",
+        variant="hpt_beamlaser_fixed_small", slot="MediumHardpoint1",
         blueprint_name="Long range", grade=1,
     )
     assert result["found"] is True
@@ -358,3 +371,239 @@ def test_power_margin_matches_real_type9_deployed_power(tmp_path):
     assert result["compatible"] is True
     assert abs(result["power_change"]) < 0.01
     assert abs(result["new_power_margin"] - 5.79) < 0.01
+
+
+# ---------------------------------------------------------------------------
+# Fix round 2: S1 (slot kind vs module kind), S2 (size from the slot, not
+# the grp), S3 (slot existence + caveat), S4 (blueprint allow-list),
+# S5 (N4/N5/N6).
+# ---------------------------------------------------------------------------
+
+def _type9_db(tmp_path):
+    """Same setup as test_power_margin_matches_real_type9_deployed_power,
+    factored out for the S1/S2/S3 repros that also need the Type-9 fixture
+    (multiple internal/hardpoint slots to target, unlike explorer_nx's
+    2-module fixture)."""
+    path = _base_db(tmp_path)
+    conn = sqlite3.connect(path)
+    type9_event = json.load(open(FIXTURES / "type9_loadout_2026-01-04.json"))
+    jw.process_event(conn, type9_event)
+    conn.commit()
+    conn.close()
+    qf.DB_PATH = path
+    return path
+
+
+def test_core_module_into_internal_slot_is_incompatible(tmp_path):
+    """N1/S1, repro F4: the FSD is a `core` module -- it must be rejected
+    for ANY slot that isn't its own standard slot, not just the other 6
+    standard slots (R5's old, narrower check). Before this round's fix,
+    the grp=="fsd" branch treated this hypothetical drive as the ship's
+    real FSD and returned compatible: True, mass_change 40.0, new_jump_range
+    8.85 -- confidently wrong numbers for an impossible fit."""
+    _type9_db(tmp_path)
+    result = qf.simulate_module_swap(
+        module_group="frame shift drive", module_class=6, module_rating="E",
+        variant="int_hyperdrive_size6_class1", slot="Slot05_Size4",
+    )
+    assert result["found"] is True
+    assert result["compatible"] is False
+
+
+def test_core_module_power_plant_into_internal_slot_is_incompatible(tmp_path):
+    """N1/S1, repro F4b: same bug, the power-plant branch. Before the fix
+    this swapped the ship's real output even though the real plant was
+    untouched, returning new_power_margin 9.39 instead of the true 5.79."""
+    _type9_db(tmp_path)
+    result = qf.simulate_module_swap(
+        module_group="power plant", module_class=5, module_rating="A",
+        slot="Slot04_Size5",
+    )
+    assert result["found"] is True
+    assert result["compatible"] is False
+
+
+def test_fuel_tank_into_undersized_internal_slot_is_incompatible(tmp_path):
+    """N1/S2, repro F3: a fuel tank IS allowed in an internal slot (S1
+    passes), but Slot05_Size4's real maximum is 4 (from its own name,
+    boosted only by whatever's actually fitted there -- a class-3 cargo
+    rack, not a class-6 tank). Before the fix, the standard-slot branch
+    was picked by `grp` alone and used the standard FuelTank's size (6),
+    returning compatible: True. This is exactly the path the C1 fix (round
+    1) sends users down: "specify which slot" when internal tanks exist."""
+    _type9_db(tmp_path)
+    result = qf.simulate_module_swap(
+        module_group="fuel tank", module_class=6, module_rating="C",
+        slot="Slot05_Size4",
+    )
+    assert result["found"] is True
+    assert result["compatible"] is False
+    assert "4" in result["reason"]
+
+
+def test_utility_module_into_hardpoint_is_incompatible(tmp_path):
+    """N3/S1, repro F5a: a shield booster (utility kind) can't go into a
+    hardpoint mount, even a fitted one with real numbers behind it.
+    Before the fix this returned compatible: True, new_power_margin 4.98."""
+    _type9_db(tmp_path)
+    result = qf.simulate_module_swap(
+        module_group="shield booster", module_class=0, module_rating="A",
+        slot="MediumHardpoint2",  # fitted (a pulse laser) on the Type-9 fixture
+    )
+    assert result["found"] is True
+    assert result["compatible"] is False
+
+
+def test_weapon_module_into_internal_slot_is_incompatible(tmp_path):
+    """N3/S1, repro F5b: a beam laser (weapon kind) can't go into an
+    internal slot, even a fitted one."""
+    _type9_db(tmp_path)
+    result = qf.simulate_module_swap(
+        module_group="beam laser", module_class=1, module_rating="E",
+        variant="hpt_beamlaser_fixed_small",
+        slot="Slot05_Size4",  # fitted (a cargo rack) on the Type-9 fixture
+    )
+    assert result["found"] is True
+    assert result["compatible"] is False
+
+
+def test_hardpoint_that_doesnt_exist_on_the_ship_is_incompatible(tmp_path):
+    """N3/S3, repro F13: the Type-9 has no Huge hardpoint at all
+    ([2,2,2,1,1,0,0,0,0] -- three Medium, two Small, four Tiny, no Large,
+    no Huge). A class-3 cannon (Hpt_Cannon_Turret_Large, rating D, the only
+    class-3-rating-D cannon -- unambiguous) is a real weapon that fits a
+    hardpoint KIND (S1 passes); this proves S3's existence check, not S1's
+    kind check."""
+    _type9_db(tmp_path)
+    result = qf.simulate_module_swap(
+        module_group="cannon", module_class=3, module_rating="D",
+        slot="HugeHardpoint1",
+    )
+    assert result["found"] is True
+    assert result["compatible"] is False
+
+
+def test_unfitted_tiny_hardpoint_beyond_ships_count_is_incompatible(tmp_path):
+    """S3: the Type-9 has 4 Tiny hardpoints (4 zeros in
+    [2,2,2,1,1,0,0,0,0]) -- TinyHardpoint5 doesn't exist. A shield booster
+    (utility kind) matches the slot KIND fine; S3's existence check is
+    what catches this."""
+    _type9_db(tmp_path)
+    result = qf.simulate_module_swap(
+        module_group="shield booster", module_class=0, module_rating="A",
+        slot="TinyHardpoint5",
+    )
+    assert result["found"] is True
+    assert result["compatible"] is False
+
+
+def test_unfitted_internal_slot_that_passes_existence_checks_gets_caveat(tmp_path):
+    """S3(c): Slot06_Size4 isn't fitted on the Type-9 fixture and its NN
+    (6) doesn't collide with any real fitted slot, and its size (4) is
+    within the ship's largest plain internal class (8) -- both checks
+    pass, so the swap proceeds but must carry a caveat: existence was
+    inferred, not confirmed (empty internal slots aren't otherwise
+    verifiable at all -- Review Focus #2)."""
+    _type9_db(tmp_path)
+    result = qf.simulate_module_swap(
+        module_group="cargo rack", module_class=4, module_rating="E",
+        variant="int_cargorack_size4_class1", slot="Slot06_Size4",
+    )
+    assert result["found"] is True
+    assert result["compatible"] is True
+    assert "caveat" in result
+    assert "Slot06_Size4" in result["caveat"]
+
+
+def test_unfitted_internal_slot_number_collision_is_not_found(tmp_path):
+    """S3(a): the Type-9 fixture really has Slot05_Size4 fitted. Asking for
+    "Slot05_Size9" (same NN, wrong Size suffix) is simply the wrong name
+    for that real slot, not a genuinely different, empty one -- found:
+    False, not a compatibility question."""
+    _type9_db(tmp_path)
+    result = qf.simulate_module_swap(
+        module_group="cargo rack", module_class=4, module_rating="E",
+        variant="int_cargorack_size4_class1", slot="Slot05_Size9",
+    )
+    assert result["found"] is False
+    assert "Slot05_Size4" in result["reason"]
+
+
+def test_torpedo_pylon_blueprint_not_in_allow_list_is_not_found(tmp_path):
+    """N2/S4, repro F6: coriolis-data/modifications/modules.json allows only
+    Weapon_LightWeight and Weapon_Sturdy for tp -- "Long range" isn't in
+    that allow-list at all, regardless of what Coriolis's coarse applies_to
+    ("Weapon") text would suggest."""
+    _db(tmp_path)
+    result = qf.simulate_module_swap(
+        module_group="torpedo pylon", module_class=1, module_rating="I",
+        slot="MediumHardpoint1",  # empty but real on explorer_nx (6 Medium hardpoints)
+        blueprint_name="Long range", grade=5,
+    )
+    assert result["found"] is False
+    assert "doesn't apply" in result["reason"]
+
+
+def test_beam_laser_overcharged_does_not_pick_up_multicannons_clip(tmp_path):
+    """N2/S4, repro F6b: "Overcharged" resolves to TWO different real
+    blueprints (Weapon_Overcharged vs MC_Overcharged) depending on the grp.
+    bl's is Weapon_Overcharged, which has no `clip` feature at all."""
+    _db(tmp_path)
+    result = qf.simulate_module_swap(
+        module_group="beam laser", module_class=1, module_rating="E",
+        variant="hpt_beamlaser_fixed_small", slot="MediumHardpoint1",
+        blueprint_name="Overcharged", grade=1,
+    )
+    assert result["found"] is True
+    assert "clip" not in result["unmodeled_blueprint_effects"]
+
+
+def test_multicannon_overcharged_does_pick_up_its_own_clip(tmp_path):
+    """N2/S4: the OTHER half of the silent-pick bug -- mc's "Overcharged"
+    allow-list entry is MC_Overcharged specifically, which DOES have a
+    `clip` feature (this code doesn't model it, so it must show up in
+    unmodeled_blueprint_effects)."""
+    _db(tmp_path)
+    result = qf.simulate_module_swap(
+        module_group="multi-cannon", module_class=1, module_rating="F",
+        variant="hpt_multicannon_fixed_small", slot="MediumHardpoint1",
+        blueprint_name="Overcharged", grade=1,
+    )
+    assert result["found"] is True
+    assert "clip" in result["unmodeled_blueprint_effects"]
+
+
+def test_module_class_as_numeric_string_matches_int(tmp_path):
+    """N4/S5: a small model can easily pass module_class="5" instead of 5
+    -- before the fix this raised a bare TypeError from `module_class >
+    max_class`. Must give the SAME result as the int form."""
+    _db(tmp_path)
+    as_int = qf.simulate_module_swap(module_group="life support", module_class=5, module_rating="D")
+    as_str = qf.simulate_module_swap(module_group="life support", module_class="5", module_rating="D")
+    assert as_str == as_int
+    assert as_str["found"] is True
+
+
+def test_module_class_out_of_range_fails_cleanly(tmp_path):
+    """N4/S5: garbage or out-of-range input (class is 0-8) must return a
+    plain reason, never a crash."""
+    _db(tmp_path)
+    result = qf.simulate_module_swap(module_group="life support", module_class=99, module_rating="D")
+    assert result["found"] is False
+
+    result = qf.simulate_module_swap(module_group="life support", module_class="not a number", module_rating="D")
+    assert result["found"] is False
+
+
+def test_missing_optmass_stays_none_not_zero(tmp_path):
+    """N6 (latent): if the currently-fitted FSD's base optmass were ever
+    missing, the jump range must come back None, not a near-zero number
+    from routing a None through the NULL->0.0 helper. No real fsd row
+    lacks optmass (Q1), so this exercises the helper directly rather than
+    trying to fabricate a fixture with a genuinely optmass-less FSD."""
+    from query_functions import _engineered_modifier
+
+    # The helper this code now uses for FSDOptimalMass never substitutes
+    # 0.0 for a missing value -- unlike _engineered_or_base (still used for
+    # Mass/PowerDraw, where NULL really does mean 0.0).
+    assert _engineered_modifier(None, "FSDOptimalMass") is None

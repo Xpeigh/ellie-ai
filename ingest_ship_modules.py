@@ -44,6 +44,19 @@ def build_schema(conn):
         );
         """
     )
+    # module_blueprints is CREATE TABLE IF NOT EXISTS, not DROP+CREATE like
+    # the two tables above -- unlike ship_stats/module_stats, an install
+    # that already has coriolis_blueprints skips setup_coriolis() entirely
+    # (see setup.py), so this ingest script is the only place an EXISTING
+    # install ever gets this table. Dropping it here would be harmless on
+    # a fresh install but would defeat that upgrade path on an existing one.
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS module_blueprints (
+            grp TEXT, fdname TEXT, PRIMARY KEY (grp, fdname)
+        );
+        """
+    )
     conn.commit()
 
 
@@ -142,13 +155,39 @@ def build_modules(conn, repo_path):
     return count
 
 
+def build_module_blueprints(conn, repo_path):
+    """Ingests modifications/modules.json's per-grp blueprint allow-list --
+    which fdnames (e.g. "MC_Overcharged") a grp (e.g. "mc") can actually
+    take, per Coriolis's own data. This is NOT the same thing as
+    coriolis_blueprints' broad applies_to category text (e.g. "Weapon"):
+    that text is far coarser than reality -- a torpedo pylon (tp) only
+    really has LightWeight/Sturdy, and "Overcharged" resolves to two
+    DIFFERENT, differently-featured blueprints depending on whether the
+    grp is a multi-cannon (MC_Overcharged) or another weapon
+    (Weapon_Overcharged). Clears and rebuilds the table every run, the
+    same convention ingest_coriolis.py uses for its own tables (this
+    table isn't dropped in build_schema -- see the comment there -- so a
+    rerun must explicitly clear stale rows itself)."""
+    data = json.load(open(Path(repo_path) / "modifications" / "modules.json", encoding="utf-8"))
+    conn.execute("DELETE FROM module_blueprints")
+    count = 0
+    for grp, entry in data.items():
+        for fdname in (entry.get("blueprints") or {}):
+            conn.execute("INSERT OR REPLACE INTO module_blueprints VALUES (?,?)", (grp, fdname))
+            count += 1
+    conn.commit()
+    return count
+
+
 def main():
     conn = sqlite3.connect(DB_PATH)
     build_schema(conn)
     ship_count = build_ships(conn, REPO_PATH)
     module_count = build_modules(conn, REPO_PATH)
+    blueprint_count = build_module_blueprints(conn, REPO_PATH)
     print(f"ship_stats: {ship_count} rows")
     print(f"module_stats: {module_count} rows")
+    print(f"module_blueprints: {blueprint_count} rows")
     conn.close()
 
 

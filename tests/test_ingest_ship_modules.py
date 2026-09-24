@@ -99,6 +99,30 @@ def test_power_plant_output_is_in_extra_json_as_pgen(tmp_path):
     conn.close()
 
 
+def test_module_blueprints_allow_list_matches_coriolis(tmp_path):
+    """S4: module_blueprints is a per-grp ALLOW-LIST (which fdnames a grp
+    can really take), not the coarse applies_to category text -- verified
+    against modifications/modules.json directly. tp only really has
+    LightWeight/Sturdy (not Long range); mc and bl both can take an
+    "Overcharged" blueprint, but under two different, differently-featured
+    fdnames (this is exactly what let round 1's category-text match pick
+    the wrong one silently)."""
+    conn = _fresh_db(tmp_path)
+    count = ism.build_module_blueprints(conn, str(REPO))
+    conn.commit()
+    assert count > 0
+
+    def fdnames(grp):
+        rows = conn.execute("SELECT fdname FROM module_blueprints WHERE grp = ?", (grp,)).fetchall()
+        return {r[0] for r in rows}
+
+    assert fdnames("tp") == {"Weapon_LightWeight", "Weapon_Sturdy"}
+    assert "MC_Overcharged" in fdnames("mc")
+    assert "Weapon_Overcharged" not in fdnames("mc")
+    assert "Weapon_Overcharged" in fdnames("bl")
+    conn.close()
+
+
 def test_rerun_is_safe_and_idempotent(tmp_path):
     conn = _fresh_db(tmp_path)
     ism.build_ships(conn, str(REPO))
