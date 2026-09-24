@@ -30,6 +30,10 @@ RULES:
 - NEVER state a material count, blueprint requirement, distance, or any other specific number from your own knowledge or training data. ALWAYS call the matching tool and report only what it returns.
 - When reporting numbers, names, or lists from a tool result, use them EXACTLY as given. Never round, approximate, or paraphrase into "selected examples" -- if something is too long to repeat in full, say so plainly and offer to narrow it down, rather than inventing a partial illustrative sample.
 - If a tool result has "found": false, tell the commander plainly that you don't have that data -- don't guess or fall back to general knowledge.
+- If a tool result has a non-empty "unmodeled_blueprint_effects" list, mention plainly that those specific effects aren't reflected in the numbers -- don't just report the numbers as if they were the whole picture.
+- If a tool result has a "variants" list, the request matched several different real modules -- list them for the commander and ask which one they mean (then call the tool again with `variant`); don't say the data is missing, and don't pick one yourself.
+- If a tool result has a "caveat", tell the commander it along with the numbers -- never drop it.
+- If a "found": false result has a "reason", pass that reason on in plain words -- it may be asking for a detail (like which slot) rather than saying the data is missing.
 - Once you have enough information to call a tool, call it immediately. Don't ask the commander to confirm an obvious detail (like a system name they already gave you) before proceeding.
 - Keep answers short and conversational, like a ship's computer, not a report.
 """
@@ -126,6 +130,46 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_current_loadout",
+            "description": "Get the commander's current ship, its real mass and jump range as reported by the game, and every fitted module including real engineering modifiers.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_ship_info",
+            "description": "Get a named ship's base stats and slot layout.",
+            "parameters": {
+                "type": "object",
+                "properties": {"ship_name": {"type": "string", "description": "Ship name, e.g. 'Python'"}},
+                "required": ["ship_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "simulate_module_swap",
+            "description": "'What if I fit a different module' -- swaps one module in the commander's CURRENT ship for a hypothetical one and reports the real resulting mass, max jump range (unladen, one jump's fuel), and power changes, or whether it's compatible at all.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "module_group": {"type": "string", "description": "e.g. 'frame shift drive', 'power plant', 'shield booster'"},
+                    "module_class": {"type": "integer", "description": "Module class/size, 0-8 (utility mounts such as shield boosters are class 0)"},
+                    "module_rating": {"type": "string", "description": "Module rating letter, e.g. 'A'"},
+                    "blueprint_name": {"type": "string", "description": "Optional engineering blueprint to apply to the hypothetical module, e.g. 'Increased range'"},
+                    "grade": {"type": "integer", "description": "Blueprint grade 1-5, required if blueprint_name is given"},
+                    "slot": {"type": "string", "description": "Optional exact slot name, e.g. 'Slot05_Size4' or 'MediumHardpoint2' -- needed if the ship has more than one slot of that type, or to put the module in an empty slot"},
+                    "variant": {"type": "string", "description": "Optional, only needed when several modules share the same type/class/rating -- e.g. 'gimballed', 'SCO', 'Mk II', 'guardian', or an exact symbol from a previous result's variants list"},
+                },
+                "required": ["module_group", "module_class", "module_rating"],
+            },
+        },
+    },
 ]
 
 DISPATCH = {
@@ -136,6 +180,9 @@ DISPATCH = {
     "player_state": qf.player_state,
     "distance_to_system": qf.distance_to_system,
     "get_material_count": qf.get_material_count,
+    "get_current_loadout": qf.get_current_loadout,
+    "get_ship_info": qf.get_ship_info,
+    "simulate_module_swap": qf.simulate_module_swap,
 }
 
 
