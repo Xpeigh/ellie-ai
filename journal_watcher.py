@@ -1,7 +1,8 @@
 """
 Watches the Elite Dangerous journal and keeps elite-dangerous.db's
 live-state tables current: materials_inventory, commander_status,
-engineer_progress.
+engineer_progress, current_loadout (+ its modules), and ship_state (the
+fuel on board and cargo in the hold, tracked from events).
 
 WHY REPLAY THEN TAIL (not just tail from the end):
 Materials/Rank/LoadGame/SquadronStartup are only written ONCE per session,
@@ -93,6 +94,19 @@ def build_schema(conn):
             engineering_experimental TEXT, engineering_modifiers_json TEXT,
             last_updated TEXT
         );
+
+        -- Fuel and cargo live in their own table, NOT in current_loadout:
+        -- a Loadout event is a full snapshot that fires on any module
+        -- change, and replacing current_loadout wholesale must never wipe
+        -- the fuel on board or the cargo in the hold. NULL means unknown.
+        CREATE TABLE IF NOT EXISTS ship_state (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            fuel_main REAL, cargo_count INTEGER, fuel_updated TEXT, cargo_updated TEXT,
+            last_jump_dist REAL, last_jump_fuel_used REAL, last_jump_fuel_before REAL,
+            last_jump_cargo INTEGER, last_jump_unladen REAL, last_jump_fsd_item TEXT,
+            last_jump_boosted INTEGER, last_jump_time TEXT
+        );
+        INSERT OR IGNORE INTO ship_state (id) VALUES (1);
         """
     )
     # CREATE TABLE IF NOT EXISTS won't add columns to a table an earlier
@@ -123,6 +137,75 @@ def set_status(conn, **fields):
     cols = ", ".join(f"{k} = :{k}" for k in fields)
     conn.execute(f"UPDATE commander_status SET {cols} WHERE id = 1", fields)
     conn.commit()
+
+
+def set_ship_state(conn, **fields):
+    """Write the named ship_state columns. A field left out stays as it was;
+    a field passed as None is written as NULL, i.e. "unknown". The *_updated
+    stamps follow the value they describe."""
+    now = _now_iso()
+    if "fuel_main" in fields:
+        fields["fuel_updated"] = now
+    if "cargo_count" in fields:
+        fields["cargo_updated"] = now
+    cols = ", ".join(f"{k} = :{k}" for k in fields)
+    conn.execute(f"UPDATE ship_state SET {cols} WHERE id = 1", fields)
+    conn.commit()
+
+
+def forget_ship_fuel_and_cargo(conn):
+    """A different ship (or a respawn) means the tracked fuel and cargo no
+    longer describe the ship we're in. Unknown beats a stale guess: nothing
+    downstream computes a current-load jump range from a NULL."""
+    set_ship_state(conn, fuel_main=None, cargo_count=None)
+
+
+def add_refuelled_fuel(conn, amount):
+    """RefuelAll/RefuelPartial report only the tonnes ADDED, so they can only
+    extend a level we already know -- with no known level there is nothing to
+    add to and it stays unknown. Capped at the tank capacity from the
+    Loadout when that is known."""
+    if amount is None:
+        return
+    fuel = conn.execute("SELECT fuel_main FROM ship_state WHERE id = 1").fetchone()[0]
+    if fuel is None:
+        return
+    fuel += amount
+    capacity = conn.execute("SELECT fuel_main FROM current_loadout WHERE id = 1").fetchone()[0]
+    if capacity is not None:
+        fuel = min(fuel, capacity)
+    set_ship_state(conn, fuel_main=fuel)
+
+
+def record_fsd_jump(conn, event):
+    """Snapshot what the game says this jump cost, alongside the ship as it
+    was BEFORE the jump (cargo, unladen mass, fitted FSD, fuel), so
+    query_functions can check its mass model against the game's own fuel
+    burn; then take FuelLevel as the new tank level.
+
+    The snapshot is all-or-nothing: an event missing JumpDist, FuelUsed or
+    FuelLevel leaves the previous snapshot whole rather than mixing two
+    jumps' numbers. The new tank level is still taken whenever FuelLevel is
+    there."""
+    dist, used, level = event.get("JumpDist"), event.get("FuelUsed"), event.get("FuelLevel")
+    fields = {}
+    if dist is not None and used is not None and level is not None:
+        cargo = conn.execute("SELECT cargo_count FROM ship_state WHERE id = 1").fetchone()[0]
+        unladen = conn.execute("SELECT unladen_mass FROM current_loadout WHERE id = 1").fetchone()[0]
+        fsd = conn.execute(
+            "SELECT item FROM current_loadout_modules WHERE slot = 'FrameShiftDrive'"
+        ).fetchone()
+        fields.update(
+            last_jump_dist=dist, last_jump_fuel_used=used, last_jump_fuel_before=level + used,
+            last_jump_cargo=cargo, last_jump_unladen=unladen,
+            last_jump_fsd_item=fsd[0] if fsd else None,
+            last_jump_boosted=1 if event.get("BoostUsed") else 0,
+            last_jump_time=event.get("timestamp"),
+        )
+    if level is not None:
+        fields["fuel_main"] = level
+    if fields:
+        set_ship_state(conn, **fields)
 
 
 def reset_materials(conn, materials_event):
@@ -216,6 +299,11 @@ def process_event(conn, event):
             current_ship_id=event.get("ShipID"),
             credits=event.get("Credits"),
         )
+        # The Cargo event follows at launch, so the hold is unknown until then.
+        fields = {"cargo_count": None}
+        if event.get("FuelLevel") is not None:
+            fields["fuel_main"] = event["FuelLevel"]
+        set_ship_state(conn, **fields)
     elif etype == "ShipyardSwap":
         # Swapping ships doesn't emit a new LoadGame, so without this
         # current_ship would stay on the old ship until the next launch.
@@ -224,6 +312,23 @@ def process_event(conn, event):
             current_ship=_ship_display_name(event.get("ShipType"), event.get("ShipType_Localised")),
             current_ship_id=event.get("ShipID"),
         )
+        forget_ship_fuel_and_cargo(conn)
+    elif etype in ("Died", "Resurrect"):
+        forget_ship_fuel_and_cargo(conn)
+    elif etype == "Cargo":
+        # The game writes a fresh Cargo event after every change to the hold,
+        # so the last one is enough -- no trade/mining delta events needed.
+        # Vessel can also be "SRV", which is a different hold.
+        if event.get("Vessel") == "Ship" and event.get("Count") is not None:
+            set_ship_state(conn, cargo_count=event["Count"])
+    elif etype == "ReservoirReplenished":
+        if event.get("FuelMain") is not None:
+            set_ship_state(conn, fuel_main=event["FuelMain"])
+    elif etype == "FuelScoop":
+        if event.get("Total") is not None:
+            set_ship_state(conn, fuel_main=event["Total"])
+    elif etype in ("RefuelAll", "RefuelPartial"):
+        add_refuelled_fuel(conn, event.get("Amount"))
     elif etype == "Rank":
         set_status(
             conn,
@@ -276,6 +381,8 @@ def process_event(conn, event):
             current_system=event.get("StarSystem"), current_station=None, docked=0,
             current_x=pos[0], current_y=pos[1], current_z=pos[2],
         )
+        if etype == "FSDJump":
+            record_fsd_jump(conn, event)
     elif etype == "Docked":
         set_status(conn, current_station=event.get("StationName"), docked=1)
     elif etype == "Undocked":
