@@ -1,8 +1,10 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from loadout_calc import compute_jump_range, apply_blueprint_delta
+from loadout_calc import compute_jump_range, compute_current_jump_range, apply_blueprint_delta
 
 
 def test_compute_jump_range_matches_real_ship():
@@ -70,3 +72,42 @@ def test_compute_jump_range_with_guardian_fsd_booster():
         1286.300049, 7333.768066, 6.8, 0.011, 2.5025, booster_bonus=6
     )
     assert with_booster - without_booster == 6
+
+
+# The commander's real Type-9 (tests/fixtures/type9_loadout_2026-01-04.json): its
+# standard class 6 drive. The journal reported MaxJumpRange 9.164523 for it.
+TYPE9_FSD = dict(fsd_optmass=960, fsd_maxfuel=5.3, fsd_fuelmul=0.011, fsd_fuelpower=2.6)
+TYPE9_UNLADEN = 1122.0
+
+
+def test_current_jump_range_full_jump_of_fuel_empty_hold_equals_max():
+    # With exactly one jump of fuel on board and an empty hold, "now" and
+    # "max" are the same ship: 9.164523 is also what the journal reported.
+    now = compute_current_jump_range(TYPE9_UNLADEN, 5.3, 0, **TYPE9_FSD)
+    assert now == pytest.approx(9.164523, abs=1e-6)
+    assert now == pytest.approx(compute_jump_range(TYPE9_UNLADEN, **TYPE9_FSD), abs=1e-9)
+
+
+def test_current_jump_range_more_fuel_weighs_more_but_burn_is_capped():
+    # 16 t aboard: the jump still burns at most maxfuel (5.3), but the extra
+    # 10.7 t of fuel is mass, so the range drops below the 5.3 t figure.
+    assert compute_current_jump_range(TYPE9_UNLADEN, 16.0, 0, **TYPE9_FSD) == pytest.approx(9.078354, abs=1e-6)
+
+
+def test_current_jump_range_counts_cargo_as_mass():
+    assert compute_current_jump_range(TYPE9_UNLADEN, 10.0, 100, **TYPE9_FSD) == pytest.approx(8.385687, abs=1e-6)
+
+
+def test_current_jump_range_less_fuel_than_a_full_jump_uses_the_fuel_on_board():
+    # 1.0 t aboard is less than maxfuel, so min(maxfuel, fuel) is 1.0.
+    assert compute_current_jump_range(TYPE9_UNLADEN, 1.0, 0, **TYPE9_FSD) == pytest.approx(4.843976, abs=1e-6)
+
+
+def test_current_jump_range_empty_tank_is_zero():
+    assert compute_current_jump_range(TYPE9_UNLADEN, 0.0, 0, **TYPE9_FSD) == 0.0
+
+
+def test_current_jump_range_adds_booster_bonus():
+    plain = compute_current_jump_range(TYPE9_UNLADEN, 10.0, 100, **TYPE9_FSD)
+    boosted = compute_current_jump_range(TYPE9_UNLADEN, 10.0, 100, **TYPE9_FSD, booster_bonus=6)
+    assert boosted - plain == pytest.approx(6, abs=1e-9)
