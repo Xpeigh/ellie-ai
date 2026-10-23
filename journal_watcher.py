@@ -104,7 +104,7 @@ def build_schema(conn):
             fuel_main REAL, cargo_count INTEGER, fuel_updated TEXT, cargo_updated TEXT,
             last_jump_dist REAL, last_jump_fuel_used REAL, last_jump_fuel_before REAL,
             last_jump_cargo INTEGER, last_jump_unladen REAL, last_jump_fsd_item TEXT,
-            last_jump_boosted INTEGER, last_jump_time TEXT
+            last_jump_boosted INTEGER, last_jump_time TEXT, last_jump_fsd_optmass REAL
         );
         INSERT OR IGNORE INTO ship_state (id) VALUES (1);
         """
@@ -115,6 +115,10 @@ def build_schema(conn):
     for col in ("current_x", "current_y", "current_z"):
         if col not in existing:
             conn.execute(f"ALTER TABLE commander_status ADD COLUMN {col} REAL")
+    # same for ship_state: the jump-time optimal mass was added after the table
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(ship_state)")}
+    if "last_jump_fsd_optmass" not in existing:
+        conn.execute("ALTER TABLE ship_state ADD COLUMN last_jump_fsd_optmass REAL")
     conn.commit()
 
 
@@ -153,11 +157,20 @@ def set_ship_state(conn, **fields):
     conn.commit()
 
 
+LAST_JUMP_COLUMNS = (
+    "last_jump_dist", "last_jump_fuel_used", "last_jump_fuel_before", "last_jump_cargo",
+    "last_jump_unladen", "last_jump_fsd_item", "last_jump_fsd_optmass", "last_jump_boosted",
+    "last_jump_time",
+)
+
+
 def forget_ship_fuel_and_cargo(conn):
-    """A different ship (or a respawn) means the tracked fuel and cargo no
-    longer describe the ship we're in. Unknown beats a stale guess: nothing
-    downstream computes a current-load jump range from a NULL."""
-    set_ship_state(conn, fuel_main=None, cargo_count=None)
+    """A different ship (a swap or a purchase) or a respawn means the tracked
+    fuel and cargo no longer describe the ship we're in, and neither does the
+    last-jump snapshot (it describes a jump by the ship we've left). Unknown
+    beats a stale guess: nothing downstream computes a current-load jump range
+    from a NULL, and the jump check skips a missing snapshot."""
+    set_ship_state(conn, fuel_main=None, cargo_count=None, **{c: None for c in LAST_JUMP_COLUMNS})
 
 
 def add_refuelled_fuel(conn, amount):
@@ -193,12 +206,20 @@ def record_fsd_jump(conn, event):
         cargo = conn.execute("SELECT cargo_count FROM ship_state WHERE id = 1").fetchone()[0]
         unladen = conn.execute("SELECT unladen_mass FROM current_loadout WHERE id = 1").fetchone()[0]
         fsd = conn.execute(
-            "SELECT item FROM current_loadout_modules WHERE slot = 'FrameShiftDrive'"
+            "SELECT item, engineering_modifiers_json FROM current_loadout_modules WHERE slot = 'FrameShiftDrive'"
         ).fetchone()
+        # The drive's optimal mass AT the jump: engineering changes it without
+        # changing the item symbol, so the item alone can't say which mass the
+        # game burned fuel against. NULL = not engineered (base value applies).
+        jump_optmass = None
+        if fsd and fsd[1]:
+            for modifier in json.loads(fsd[1]):
+                if modifier.get("Label") == "FSDOptimalMass":
+                    jump_optmass = modifier.get("Value")
         fields.update(
             last_jump_dist=dist, last_jump_fuel_used=used, last_jump_fuel_before=level + used,
             last_jump_cargo=cargo, last_jump_unladen=unladen,
-            last_jump_fsd_item=fsd[0] if fsd else None,
+            last_jump_fsd_item=fsd[0] if fsd else None, last_jump_fsd_optmass=jump_optmass,
             last_jump_boosted=1 if event.get("BoostUsed") else 0,
             last_jump_time=event.get("timestamp"),
         )
@@ -313,7 +334,11 @@ def process_event(conn, event):
             current_ship_id=event.get("ShipID"),
         )
         forget_ship_fuel_and_cargo(conn)
-    elif etype in ("Died", "Resurrect"):
+    elif etype in ("ShipyardNew", "Died", "Resurrect"):
+        # ShipyardNew: buying a ship writes ShipyardBuy + ShipyardNew + Loadout
+        # and no ShipyardSwap (real journals: 55 purchases, 52 followed by a
+        # Loadout within 6 events), so without this the old ship's fuel would
+        # be kept as the new ship's.
         forget_ship_fuel_and_cargo(conn)
     elif etype == "Cargo":
         # The game writes a fresh Cargo event after every change to the hold,
@@ -381,7 +406,10 @@ def process_event(conn, event):
             current_system=event.get("StarSystem"), current_station=None, docked=0,
             current_x=pos[0], current_y=pos[1], current_z=pos[2],
         )
-        if etype == "FSDJump":
+        # A taxi (or multicrew) jump reports the TAXI's fuel, not our ship's
+        # (27 of 4,056 real jumps): the commander did move, so the system and
+        # position above are updated, but the ship's fuel and snapshot are not.
+        if etype == "FSDJump" and not (event.get("Taxi") or event.get("Multicrew")):
             record_fsd_jump(conn, event)
     elif etype == "Docked":
         set_status(conn, current_station=event.get("StationName"), docked=1)

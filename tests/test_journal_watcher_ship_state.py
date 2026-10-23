@@ -88,6 +88,8 @@ def test_load_game_without_fuel_level_leaves_fuel_unchanged(tmp_path):
 
 @pytest.mark.parametrize("event", [
     {"timestamp": "2026-10-23T10:00:00Z", "event": "ShipyardSwap", "ShipType": "type9", "ShipID": 43},
+    # buying a ship writes ShipyardBuy + ShipyardNew + Loadout and NO ShipyardSwap (real journals: 55 purchases)
+    {"timestamp": "2026-10-23T10:00:00Z", "event": "ShipyardNew", "ShipType": "type9", "NewShipID": 44},
     {"timestamp": "2026-10-23T10:00:00Z", "event": "Died", "KillerName": "Pirate"},
     {"timestamp": "2026-10-23T10:00:00Z", "event": "Resurrect", "Option": "rebuy", "Cost": 1000, "Bankrupt": False},
 ])
@@ -299,3 +301,153 @@ def test_real_type9_loadout_fixture_does_not_disturb_ship_state(tmp_path):
     jw.process_event(conn, json.load(open(FIXTURES / "type9_loadout_2026-01-04.json")))
     state = _state(conn)
     assert (state["fuel_main"], state["cargo_count"]) == (40.0, 200)
+
+
+# --- fix round 1 ------------------------------------------------------------
+
+LAST_JUMP_COLUMNS = (
+    "last_jump_dist", "last_jump_fuel_used", "last_jump_fuel_before", "last_jump_cargo",
+    "last_jump_unladen", "last_jump_fsd_item", "last_jump_fsd_optmass", "last_jump_boosted", "last_jump_time",
+)
+
+
+def _engineered_fsd_loadout(optmass):
+    """LOADOUT_WITH_FSD with the drive engineered to the given FSDOptimalMass."""
+    event = json.loads(json.dumps(LOADOUT_WITH_FSD))
+    event["Modules"][0]["Engineering"] = {
+        "BlueprintName": "FSD_LongRange", "Level": 5, "Quality": 0.6,
+        "Modifiers": [
+            {"Label": "Mass", "Value": 208.0, "OriginalValue": 160.0, "LessIsGood": 1},
+            {"Label": "FSDOptimalMass", "Value": optmass, "OriginalValue": 4670.0, "LessIsGood": 0},
+        ],
+    }
+    return event
+
+
+def _record_a_jump(conn):
+    jw.process_event(conn, LOADOUT_WITH_FSD)
+    jw.process_event(conn, LOAD_GAME)
+    jw.process_event(conn, {"event": "Cargo", "Vessel": "Ship", "Count": 6})
+    jw.process_event(conn, FSD_JUMP)
+    assert _state(conn)["last_jump_dist"] == 20.252  # sanity: there is a snapshot to lose
+
+
+def test_old_ship_state_table_gains_the_jump_optmass_column_without_losing_data(tmp_path):
+    """A database from before last_jump_fsd_optmass existed: CREATE TABLE IF
+    NOT EXISTS won't add the column, so build_schema has to."""
+    conn = sqlite3.connect(str(tmp_path / "old.db"))
+    conn.executescript(
+        """
+        CREATE TABLE ship_state (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            fuel_main REAL, cargo_count INTEGER, fuel_updated TEXT, cargo_updated TEXT,
+            last_jump_dist REAL, last_jump_fuel_used REAL, last_jump_fuel_before REAL,
+            last_jump_cargo INTEGER, last_jump_unladen REAL, last_jump_fsd_item TEXT,
+            last_jump_boosted INTEGER, last_jump_time TEXT
+        );
+        INSERT INTO ship_state (id, fuel_main, cargo_count, last_jump_dist) VALUES (1, 12.5, 7, 20.252);
+        """
+    )
+    jw.build_schema(conn)
+    state = _state(conn)
+    assert (state["fuel_main"], state["cargo_count"], state["last_jump_dist"]) == (12.5, 7, 20.252)
+    assert state["last_jump_fsd_optmass"] is None
+    jw.process_event(conn, {"event": "ReservoirReplenished", "FuelMain": 3.0})  # and it is writable
+    assert _state(conn)["fuel_main"] == 3.0
+
+
+def test_fsd_jump_snapshots_the_engineered_optimal_mass_in_force_at_the_jump(tmp_path):
+    conn = _conn(tmp_path)
+    jw.process_event(conn, _engineered_fsd_loadout(1488.0))
+    jw.process_event(conn, FSD_JUMP)
+    assert _state(conn)["last_jump_fsd_optmass"] == 1488.0
+
+
+def test_fsd_jump_snapshot_optmass_is_null_for_an_unengineered_drive(tmp_path):
+    conn = _conn(tmp_path)
+    jw.process_event(conn, LOADOUT_WITH_FSD)
+    jw.process_event(conn, FSD_JUMP)
+    assert _state(conn)["last_jump_fsd_optmass"] is None
+
+
+def test_fsd_jump_snapshot_optmass_is_null_when_the_drive_has_no_such_modifier(tmp_path):
+    conn = _conn(tmp_path)
+    event = _engineered_fsd_loadout(1488.0)
+    event["Modules"][0]["Engineering"]["Modifiers"] = [{"Label": "Mass", "Value": 208.0, "OriginalValue": 160.0, "LessIsGood": 1}]
+    jw.process_event(conn, event)
+    jw.process_event(conn, FSD_JUMP)
+    assert _state(conn)["last_jump_fsd_optmass"] is None
+
+
+def test_a_later_loadout_does_not_rewrite_the_recorded_jump_optmass(tmp_path):
+    conn = _conn(tmp_path)
+    jw.process_event(conn, _engineered_fsd_loadout(1488.0))
+    jw.process_event(conn, FSD_JUMP)
+    jw.process_event(conn, LOADOUT_WITH_FSD)  # re-engineered / un-engineered since
+    assert _state(conn)["last_jump_fsd_optmass"] == 1488.0
+
+
+@pytest.mark.parametrize("event", [
+    {"event": "ShipyardSwap", "ShipType": "type9", "ShipID": 43},
+    {"event": "ShipyardNew", "ShipType": "type9", "NewShipID": 44},
+    {"event": "Died", "KillerName": "Pirate"},
+    {"event": "Resurrect", "Option": "rebuy", "Cost": 1000, "Bankrupt": False},
+])
+def test_ship_change_or_death_also_forgets_the_last_jump_snapshot(tmp_path, event):
+    """The snapshot describes a jump by the ship we've left; keeping it would
+    let the jump check judge the next ship's drive by it."""
+    conn = _conn(tmp_path)
+    _record_a_jump(conn)
+    jw.process_event(conn, event)
+    state = _state(conn)
+    assert {c: state[c] for c in LAST_JUMP_COLUMNS} == {c: None for c in LAST_JUMP_COLUMNS}
+    assert state["fuel_main"] is None and state["cargo_count"] is None
+
+
+def test_buying_a_ship_forgets_the_old_ships_fuel_and_cargo(tmp_path):
+    conn = _conn(tmp_path)
+    _set_state(conn, fuel_main=20.0, cargo_count=100)
+    jw.process_event(conn, {"event": "ShipyardBuy", "ShipType": "type9", "ShipPrice": 1})  # not a ship change by itself
+    assert _state(conn)["fuel_main"] == 20.0
+    jw.process_event(conn, {"event": "ShipyardNew", "ShipType": "type9", "NewShipID": 44})
+    state = _state(conn)
+    assert state["fuel_main"] is None and state["cargo_count"] is None
+
+
+# Real Taxi event (Journal, trimmed): the jump reports the TAXI's fuel, not the
+# commander's ship's -- 27 of 4,056 real FSDJump events.
+TAXI_JUMP = {
+    "timestamp": "2026-10-23T09:40:00Z", "event": "FSDJump", "Taxi": True, "Multicrew": False,
+    "StarSystem": "Sol", "StarPos": [0.0, 0.0, 0.0],
+    "JumpDist": 20.022, "FuelUsed": 1.501045, "FuelLevel": 6.498955,
+}
+
+
+@pytest.mark.parametrize("flags", [{"Taxi": True, "Multicrew": False}, {"Taxi": False, "Multicrew": True}, {"Multicrew": True}])
+def test_taxi_and_multicrew_jumps_leave_the_ships_fuel_cargo_and_snapshot_alone(tmp_path, flags):
+    conn = _conn(tmp_path)
+    _record_a_jump(conn)
+    before = _state(conn)
+    jw.process_event(conn, {**TAXI_JUMP, **flags})
+    assert _state(conn) == before
+    assert before["fuel_main"] == 7.369448 and before["cargo_count"] == 6
+
+
+def test_taxi_jump_still_moves_the_commander(tmp_path):
+    conn = _conn(tmp_path)
+    jw.process_event(conn, FSD_JUMP)
+    jw.process_event(conn, TAXI_JUMP)
+    row = conn.execute("SELECT current_system, current_x, current_y, current_z FROM commander_status WHERE id = 1").fetchone()
+    assert row == ("Sol", 0.0, 0.0, 0.0)
+
+
+def test_a_normal_jump_after_a_taxi_ride_records_as_before(tmp_path):
+    conn = _conn(tmp_path)
+    jw.process_event(conn, LOADOUT_WITH_FSD)
+    jw.process_event(conn, LOAD_GAME)
+    jw.process_event(conn, TAXI_JUMP)
+    jw.process_event(conn, FSD_JUMP)
+    state = _state(conn)
+    assert state["fuel_main"] == 7.369448
+    assert state["last_jump_dist"] == 20.252
+    assert state["last_jump_fuel_before"] == pytest.approx(11.655101, abs=1e-9)
