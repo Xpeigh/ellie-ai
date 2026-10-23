@@ -1618,3 +1618,152 @@ Add a checked-off entry under a new "Ship loadout calculator (Phase A)" section,
 git add plan.md
 git commit -m "Phase A (ship loadout calculator) complete"
 ```
+
+---
+
+## Task 9: Current-load jump range (fuel + cargo tracking) and grounded summaries
+
+**Execution order:** run this BEFORE Task 8 (Task 8 is the final end-to-end check and must see this work).
+
+**Why (commander's requirement, 2026-10-23):** the range that matters is the one with the ship's CURRENT cargo and fuel, not the journal's `MaxJumpRange`, which is the empty-hold, one-jump-of-fuel maximum. A real-model test (granite4.1:3b against the commander's real Mandalay) also showed three result-shape problems that this task fixes at the source instead of hoping a 3B model copes: (1) raw floats get truncated or rounded by the model (`85.976151` became `85.976`/`85.98`), (2) `fuel_main` in `get_current_loadout` is the tank CAPACITY, not the fuel on board, so a model can say "you have 32 t of fuel", (3) swap results carry no baseline and no ship name, so the model invented "your range expands" and named the wrong ship.
+
+**Verified facts (all from the commander's real journals + coriolis-data, 2026-10-23; do not re-derive, use as given):**
+- The game computes a jump's fuel as `FuelUsed = fuelmul * (JumpDist * M / optmass) ** fuelpower`. Running that backwards on every real `FSDJump` gives the ship's total mass `M`. **`M = UnladenMass + main-tank fuel before the jump + cargo tonnes`** (the reservoir is NOT added). Over 2,951 real jumps on 22 ships (cargo up to 1,302 t): median error 0.013 t, 97.4% within 0.5 t.
+- Current maximum range = `optmass * (min(maxfuel, fuel_main) / fuelmul) ** (1/fuelpower) / (unladen + fuel_main + cargo)`, plus the Guardian booster bonus if fitted (the booster term stays unverified, as in `compute_jump_range`). No real jump exceeded this computed maximum in 99.2% of 2,916 jumps; the exceptions are a few quirky sessions (see the jump check below).
+- `compute_jump_range` (the existing max formula, mass = unladen + maxfuel) reproduces the journal's `MaxJumpRange` for all 121 distinct SCO-drive loadouts and 105 of 106 standard-drive loadouts (the one miss: a Dolphin, 19.923 vs 19.9 ly).
+- Fuel can be tracked from journal events alone: absolute levels from `LoadGame.FuelLevel`, `ReservoirReplenished.FuelMain`, `FuelScoop.Total`, `FSDJump.FuelLevel`; relative from `RefuelAll`/`RefuelPartial.Amount`. Tracked pre-jump fuel matched the real value to within 0.05 t on 98.4% of 3,896 jumps (median error 0.0000); the misses are stale values from an unseen ship change, caught by treating fuel outside `[0, tank capacity]` as unknown.
+- Cargo: the last `Cargo` event (`Vessel == "Ship"`) `Count` is enough. Adding trade/mining/drone delta events changed nothing, because the game writes a fresh `Cargo` event after every change.
+- `FuelMain` (reservoir event) and `FSDJump.FuelLevel` are the same quantity (verified by the exact match above). The fuel reservoir is not part of any of this.
+
+**Files:**
+- Modify: `loadout_calc.py`, `journal_watcher.py`, `query_functions.py`, `ellie_chat.py`
+- Tests: `tests/test_loadout_calc.py`, new `tests/test_journal_watcher_ship_state.py`, `tests/test_ship_loadout_queries.py`, `tests/test_simulate_module_swap.py`, `tests/test_ellie_chat_ship_tools.py`
+
+**Out of scope (do NOT build):** reading `Status.json`; cargo delta events; any new tool; changing hardpoint/slot logic; touching `ingest_*.py`, `setup.py`, or anything in Tasks 1-7 beyond what is listed here.
+
+- [ ] **Step 1: `compute_current_jump_range` in `loadout_calc.py` (TDD)**
+
+Add, next to `compute_jump_range`:
+
+```python
+def compute_current_jump_range(unladen_mass, fuel_main, cargo, fsd_optmass, fsd_maxfuel, fsd_fuelmul, fsd_fuelpower, booster_bonus=0.0):
+    """Max single-jump range in ly with the ship as it is NOW: total mass is
+    unladen + the fuel in the main tank + cargo tonnes, and one jump burns
+    at most min(fsd_maxfuel, fuel_main). 0.0 when the tank is empty."""
+```
+Same formula as `compute_jump_range` except `total_mass = unladen_mass + fuel_main + cargo` and the fuel term uses `min(fsd_maxfuel, fuel_main)`. Return `0.0` if `fuel_main <= 0`. The docstring records the verification above (numbers, dates) and the same booster caveat.
+
+Tests (`tests/test_loadout_calc.py`), pinned from the real Type-9 fixture FSD (`unladen 1122.0, optmass 960, maxfuel 5.3, fuelmul 0.011, fuelpower 2.6`), `pytest.approx(..., abs=1e-6)`:
+- `fuel=5.3, cargo=0` -> `9.164523`, and it equals `compute_jump_range(...)` (the same 9.164523 the journal reported).
+- `fuel=16.0, cargo=0` -> `9.078354`
+- `fuel=10.0, cargo=100` -> `8.385687`
+- `fuel=1.0, cargo=0` -> `4.843976` (less fuel than a full jump uses `min(maxfuel, fuel)`)
+- `fuel=0.0` -> `0.0`
+
+- [ ] **Step 2: ship state tracking in `journal_watcher.py` (TDD, new test file)**
+
+In `build_schema`, add (CREATE TABLE IF NOT EXISTS; do NOT touch `current_loadout`/`set_loadout`: a `Loadout` event must not wipe fuel or cargo):
+
+```sql
+CREATE TABLE IF NOT EXISTS ship_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    fuel_main REAL, cargo_count INTEGER, fuel_updated TEXT, cargo_updated TEXT,
+    last_jump_dist REAL, last_jump_fuel_used REAL, last_jump_fuel_before REAL,
+    last_jump_cargo INTEGER, last_jump_unladen REAL, last_jump_fsd_item TEXT,
+    last_jump_boosted INTEGER, last_jump_time TEXT
+);
+INSERT OR IGNORE INTO ship_state (id) VALUES (1);
+```
+
+Event rules in `process_event` (a missing field leaves that value unchanged, never writes a guess):
+
+| event | effect |
+|---|---|
+| `LoadGame` | `fuel_main = FuelLevel`; `cargo_count = NULL` (the `Cargo` event follows at launch) |
+| `ShipyardSwap`, `Died`, `Resurrect` | `fuel_main = NULL`, `cargo_count = NULL` |
+| `Cargo` with `Vessel == "Ship"` | `cargo_count = Count` (ignore other vessels) |
+| `ReservoirReplenished` | `fuel_main = FuelMain` |
+| `FuelScoop` | `fuel_main = Total` |
+| `RefuelAll`, `RefuelPartial` | if `fuel_main` is not NULL: `fuel_main = fuel_main + Amount`, capped at `current_loadout.fuel_main` (the tank capacity) when that is not NULL; if `fuel_main` is NULL it stays NULL |
+| `FSDJump` | FIRST record `last_jump_*`: `dist = JumpDist`, `fuel_used = FuelUsed`, `fuel_before = FuelLevel + FuelUsed`, `cargo = ship_state.cargo_count` as it was, `unladen = current_loadout.unladen_mass`, `fsd_item` = the item in `current_loadout_modules` slot `FrameShiftDrive`, `boosted = 1 if BoostUsed else 0`, `time = timestamp`; THEN `fuel_main = FuelLevel`. Keep the existing system/position update for this event exactly as it is. |
+
+`*_updated` columns get `_now_iso()` when their value is written.
+
+Tests (`tests/test_journal_watcher_ship_state.py`, using `jw.build_schema` on a tmp DB and `jw.process_event`): one test per row above; the `RefuelAll` cap (capacity 32.0, fuel 31.0, Amount 5.0 -> 32.0); `RefuelAll` with NULL fuel stays NULL; a `Cargo` event with `Vessel: "SRV"` is ignored; a `Loadout` event does NOT change `fuel_main`/`cargo_count`; and the `FSDJump` snapshot (build a tiny loadout first so `unladen`/`fsd_item` have values).
+
+- [ ] **Step 3: shared helpers + `get_current_loadout` in `query_functions.py` (TDD)**
+
+Add helpers (names are suggestions; keep them private):
+- `_fitted_fsd_params(conn)`: the fitted FSD's `optmass` (the journal's engineered `FSDOptimalMass` modifier if present, else the base value), `maxfuel`, `fuelmul`, `fuelpower`, the fitted item, and the Guardian booster bonus (`jumpboost` of a fitted `gfsb`, else 0.0), or `None` if the FSD is missing from `module_stats`. **`simulate_module_swap` already contains this lookup inline (the `else` branch where the FSD is not the swapped slot): move that logic into this helper and call it from both places. Behaviour of `simulate_module_swap` must not change; its existing tests are the guard.** Keep `None` for a missing base optmass (do not turn it into 0.0).
+- `_current_ship_state(conn, params)`: returns `(fuel_now, cargo_now, usable, state_note)`. State is unusable when: fuel is NULL; cargo is NULL; fuel is `< 0` or `> tank capacity + 1e-6`; or `params` is None. Exact `state_note` strings (use these, nothing else):
+  - fuel NULL: `current fuel isn't known yet (no refuel, jump or load event seen since the ship changed)`
+  - cargo NULL: `current cargo isn't known yet (the game hasn't reported the cargo hold since the ship changed)`
+  - fuel outside the tank: `the tracked fuel level doesn't fit this ship's tank, so it's probably stale`
+  - no FSD data: `the fitted frame shift drive isn't in Ellie's module data`
+
+`get_current_loadout()` returns (rounded floats are `round(x, 2)`):
+
+```python
+{
+ "found": True,
+ "ship": <journal key, unchanged>,
+ "ship_name": <ship_stats display name via _resolve_ship_stats, else the journal key>,
+ "jump_range_now": <float or None>,          # compute_current_jump_range(unladen, fuel, cargo, ...), None if state unusable
+ "jump_range_max": <rounded journal MaxJumpRange>,   # RENAMED from max_jump_range
+ "fuel_now": <float or None>, "cargo_now": <int/float or None>,
+ "mass_now": <unladen + fuel + cargo, or None>,
+ "unladen_mass": <rounded>, "cargo_capacity": <as before>,
+ "fuel_tank_capacity": <old fuel_main>,       # RENAMED: it is the capacity
+ "fuel_reservoir_capacity": <old fuel_reserve>,   # RENAMED
+ "state_note": <string or None>,              # why jump_range_now is None
+ "warning": <string, only present when the jump check fails>,
+ "summary": <string>,
+ "modules": [...]                              # unchanged
+}
+```
+
+`summary` (exact templates, numbers via `str()` of the rounded value):
+- usable: `"{ship_name}: jump range now {jump_range_now} ly (fuel {fuel_now} t, cargo {cargo_now} t, mass {mass_now} t); max {jump_range_max} ly with an empty hold and one jump of fuel."`
+- unusable: `"{ship_name}: max jump range {jump_range_max} ly (empty hold, one jump of fuel). Current-load jump range unavailable: {state_note}."`
+
+**Jump check** (honesty guard for the quirky sessions): when `ship_state` has `last_jump_dist` and `last_jump_fuel_used`, `last_jump_boosted == 0`, `last_jump_cargo` is not NULL, `last_jump_fsd_item` equals the currently fitted FSD item, and `params` exist: `implied = optmass * (fuel_used / fuelmul) ** (1/fuelpower) / dist`, `modeled = last_jump_unladen + last_jump_fuel_before + last_jump_cargo`. If `abs(implied - modeled) > 1.0`, add `"warning": f"Ellie's mass estimate for your last jump was off by {abs(implied - modeled):.1f} t, so these jump ranges may be inaccurate."` and append that sentence to `summary`. (Normal jumps agree to ~0.01 t; 97% are within 0.5 t.) Skip the check silently when any condition is missing.
+
+Tests (`tests/test_ship_loadout_queries.py`, Type-9 fixture, set `ship_state` directly): `fuel 10.0, cargo 100` -> `jump_range_now == 8.39`, `mass_now == 1232.0`, `jump_range_max == 9.16`, `ship_name == "Type-9 Heavy"` and the exact usable `summary`: `Type-9 Heavy: jump range now 8.39 ly (fuel 10.0 t, cargo 100 t, mass 1232.0 t); max 9.16 ly with an empty hold and one jump of fuel.`; each `state_note` case (fuel NULL, cargo NULL, fuel 99.0 vs capacity 64.0, FSD not in module_stats) gives `jump_range_now is None` and the exact string; the unusable `summary`; the renamed keys exist and `max_jump_range`/`fuel_main`/`fuel_reserve` are gone; jump check: a consistent last jump (build `dist` from the formula so the mass matches) gives no `warning`, an inconsistent one (`last_jump_cargo` 300 t off) gives the exact warning text, a boosted or different-FSD last jump gives none. Update every existing assertion that used the old key names.
+
+- [ ] **Step 4: `simulate_module_swap` result keys + summary (TDD)**
+
+Keep every existing key EXCEPT: rename `new_jump_range` to `new_jump_range_max`. Add:
+- `ship_name` (as above)
+- `old_jump_range_max`: the journal's `MaxJumpRange`, rounded
+- `jump_range_change_max`: `new - old`
+- `fuel_now`, `cargo_now` (None when the state is unusable, same rules and `state_note` strings as Step 3; add a `state_note` key)
+- `old_jump_range_now`: `compute_current_jump_range` for the CURRENT ship; `new_jump_range_now`: for the hypothetical swap using the same new-unladen/new-FSD logic the max figure already uses (fuel and cargo unchanged); `jump_range_change_now`: `new - old`. All three None when the state is unusable.
+- ranged blueprint rolls: `new_*` and `*_change_*` use the existing `_min_max_or_single` shape (`{"min": a, "max": b}` when a != b); the `old_*` values are always a single float.
+- `summary`:
+  - single-valued: `"{ship_name}: swapping {removed_item} for {added_symbol} in {slot}: jump range now {old_now} -> {new_now} ly ({change_now:+.2f}); max {old_max} -> {new_max} ly ({change_max:+.2f}); unladen mass {old_unladen} -> {new_unladen} t ({mass_change:+.2f}); power margin {margin} MW."`
+  - empty target slot: `adding {added_symbol}` instead of `swapping X for Y`
+  - state unusable: drop the `jump range now` clause and append ` Current-load jump range unavailable: {state_note}.`
+  - margin unknown (None): drop the `power margin` clause
+  - a ranged value reads `between {min} and {max}` in place of the single number, and its change is omitted from the parentheses
+  - every number in `summary` must appear in the structured result, rounded to 2 dp
+- Incompatible / not-found results are unchanged (they already carry a plain `reason`). No `summary` there.
+
+Tests: update every existing assertion on `new_jump_range`; add pinned tests on the Type-9 fixture: the baseline keys with `fuel 10.0, cargo 100`; the FSD-swap case's `old_jump_range_now` equals the Step 3 `jump_range_now` for the same state; the exact single-valued `summary` for the existing pinned FSD-swap scenario (compute the numbers from the result itself, then assert the whole string, so the format is pinned); the unusable-state case; the empty-slot wording; a ranged-blueprint smoke test (`between ... and ...`, no `+.2f` change in parentheses); a test that every number in `summary` appears in the result dict.
+
+- [ ] **Step 5: `ellie_chat.py` descriptions and prompt (TDD)**
+
+- `get_current_loadout` description -> `Get the commander's current ship: its jump range right now (with the fuel and cargo on board), its empty-ship maximum jump range, mass, and every fitted module including real engineering modifiers.`
+- `simulate_module_swap` description: replace `max jump range (unladen, one jump's fuel)` with `jump range now (current fuel and cargo) and empty-ship maximum jump range`.
+- Add to `SYSTEM_PROMPT` rules (after the `"caveat"` line):
+  - `- If a tool result has a "summary", base your answer on it: you may rephrase, but keep every number and unit exactly as written.`
+  - `- When asked for the "jump range" without more detail, give jump_range_now (the range with the current fuel and cargo); mention jump_range_max only as the empty-ship maximum, never as the current range.`
+- Test (`tests/test_ellie_chat_ship_tools.py`): the two prompt lines are in `SYSTEM_PROMPT`, and the two descriptions contain `right now` / `jump range now`.
+
+- [ ] **Step 6: full suite + commit**
+
+Run: `python -m pytest tests/ -q` -> all pass. Commit in logical pieces (author Xpeigh, repo-local config), each ending with `Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>`:
+1. `Add compute_current_jump_range`
+2. `Track fuel and cargo from journal events`
+3. `get_current_loadout: current-load jump range, honest key names, summary, jump check`
+4. `simulate_module_swap: current-load jump ranges, baselines, summary`
+5. `Teach the chat prompt about jump_range_now and summary`
