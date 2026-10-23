@@ -1019,3 +1019,131 @@ def test_every_number_in_the_summary_is_in_the_structured_result(tmp_path, scena
     in_result = _numbers_in({k: v for k, v in result.items() if k != "summary"})
     missing = [n for n in in_summary if round(n, 2) not in in_result]
     assert missing == [], f"summary numbers not in the result: {missing}\n{result['summary']}"
+
+
+# ---------------------------------------------------------------------------
+# Fix round 1: the swap carries the same jump check as get_current_loadout, and
+# never crashes / prints "None" for a Loadout missing UnladenMass or MaxJumpRange.
+# ---------------------------------------------------------------------------
+
+OFF_BY_300 = "Ellie's mass estimate for your last jump was off by 300.0 t, so these jump ranges may be inaccurate."
+NO_EMPTY_MASS = "the ship's empty mass isn't known yet"
+TYPE9_FSD_ITEM = "int_hyperdrive_size6_class1"
+LS_SWAP_SUMMARY = (
+    "Type-9 Heavy: swapping int_lifesupport_size5_class1 for int_lifesupport_size5_class2 in LifeSupport: "
+    "jump range now 8.39 -> 8.47 ly (+0.08); max 9.16 -> 9.26 ly (+0.10); "
+    "unladen mass 1122.0 -> 1110.0 t (-12.00); power margin 5.72 MW."
+)
+
+
+def _consistent_last_jump(cargo=100):
+    """Type-9 last-jump snapshot whose distance is built from the game's fuel
+    formula for mass 1122.0 + 10.0 + 100 (optmass 960, fuelmul 0.011, power
+    2.6, 5.3 t burned); `cargo` is what Ellie REMEMBERS, so 400 is 300 t off."""
+    dist = 960 * (5.3 / 0.011) ** (1 / 2.6) / (1122.0 + 10.0 + 100)
+    return dict(
+        last_jump_dist=dist, last_jump_fuel_used=5.3, last_jump_fuel_before=10.0,
+        last_jump_cargo=cargo, last_jump_unladen=1122.0, last_jump_fsd_item=TYPE9_FSD_ITEM,
+        last_jump_boosted=0, last_jump_time="2026-10-23T09:34:43Z",
+    )
+
+
+def _ls_swap():
+    return qf.simulate_module_swap(module_group="life support", module_class=5, module_rating="D")
+
+
+def test_swap_with_a_consistent_last_jump_has_no_warning(tmp_path):
+    path = _type9_now(tmp_path, fuel=10.0, cargo=100)
+    _set_ship_state(path, **_consistent_last_jump())
+    result = _ls_swap()
+    assert "warning" not in result
+    assert result["summary"] == LS_SWAP_SUMMARY
+
+
+def test_swap_carries_the_jump_check_warning_and_appends_it_to_the_summary(tmp_path):
+    path = _type9_now(tmp_path, fuel=10.0, cargo=100)
+    _set_ship_state(path, **_consistent_last_jump(cargo=400))
+    result = _ls_swap()
+    assert result["warning"] == OFF_BY_300
+    assert result["summary"] == LS_SWAP_SUMMARY + " " + OFF_BY_300
+    assert result["summary"].endswith("power margin 5.72 MW. " + OFF_BY_300)
+    # the same sentence get_current_loadout gives for the same state
+    assert qf.get_current_loadout()["warning"] == result["warning"]
+    assert result["old_jump_range_now"] == 8.39  # numbers still given; the warning qualifies them
+
+
+def test_swap_warning_goes_after_the_unavailable_note_never_with_it(tmp_path):
+    """No current range -> no warning (it would qualify nothing)."""
+    path = _type9_now(tmp_path, fuel=None, cargo=None)
+    _set_ship_state(path, **_consistent_last_jump(cargo=400))
+    result = _ls_swap()
+    assert result["old_jump_range_now"] is None
+    assert "warning" not in result
+    assert "may be inaccurate" not in result["summary"]
+    assert result["summary"].endswith(
+        "Current-load jump range unavailable: current fuel isn't known yet "
+        "(no refuel, jump or load event seen since the ship changed)."
+    )
+
+
+def test_swap_after_re_engineering_the_drive_has_no_false_warning(tmp_path):
+    path = _type9_now(tmp_path, fuel=10.0, cargo=100)
+    _set_ship_state(path, **_consistent_last_jump())
+    event = json.load(open(FIXTURES / "type9_loadout_2026-01-04.json"))
+    for module in event["Modules"]:
+        if module["Slot"] == "FrameShiftDrive":
+            module["Engineering"] = {"BlueprintName": "FSD_LongRange", "Level": 5, "Quality": 0.6, "Modifiers": [
+                {"Label": "FSDOptimalMass", "Value": 1488.0, "OriginalValue": 960.0, "LessIsGood": 0}]}
+    conn = sqlite3.connect(path)
+    jw.process_event(conn, event)
+    conn.close()
+    result = _ls_swap()
+    assert "warning" not in result
+    assert result["old_jump_range_now"] == 13.0  # computed with the drive as it is now
+
+
+def test_swap_incompatible_results_carry_no_warning(tmp_path):
+    path = _type9_now(tmp_path, fuel=10.0, cargo=100)
+    _set_ship_state(path, **_consistent_last_jump(cargo=400))
+    too_big = qf.simulate_module_swap(module_group="life support", module_class=8, module_rating="E")
+    assert too_big["compatible"] is False
+    assert "warning" not in too_big and "summary" not in too_big
+
+
+def test_swap_with_unknown_empty_mass_does_not_crash_and_says_why(tmp_path):
+    path = _type9_now(tmp_path, fuel=10.0, cargo=100)
+    conn = sqlite3.connect(path)
+    conn.execute("UPDATE current_loadout SET unladen_mass = NULL WHERE id = 1")
+    conn.commit()
+    conn.close()
+    result = _ls_swap()
+    assert result["found"] is True and result["compatible"] is True
+    assert result["state_note"] == NO_EMPTY_MASS
+    assert result["fuel_now"] is None and result["cargo_now"] is None
+    assert result["old_jump_range_now"] is None and result["new_jump_range_now"] is None
+    assert result["old_unladen_mass"] is None and result["new_unladen_mass"] is None
+    assert result["new_jump_range_max"] is None and result["jump_range_change_max"] is None
+    assert result["mass_change"] == -12.0  # the module's own mass difference is still known
+    assert result["summary"] == (
+        "Type-9 Heavy: swapping int_lifesupport_size5_class1 for int_lifesupport_size5_class2 in LifeSupport: "
+        f"power margin 5.72 MW. Current-load jump range unavailable: {NO_EMPTY_MASS}."
+    )
+    assert "None" not in result["summary"]
+
+
+def test_swap_with_unknown_max_jump_range_leaves_the_max_clause_out(tmp_path):
+    path = _type9_now(tmp_path, fuel=10.0, cargo=100)
+    conn = sqlite3.connect(path)
+    conn.execute("UPDATE current_loadout SET max_jump_range = NULL WHERE id = 1")
+    conn.commit()
+    conn.close()
+    result = _ls_swap()
+    assert result["old_jump_range_max"] is None
+    assert result["jump_range_change_max"] is None
+    assert result["new_jump_range_max"] == 9.26  # still computed
+    assert result["summary"] == (
+        "Type-9 Heavy: swapping int_lifesupport_size5_class1 for int_lifesupport_size5_class2 in LifeSupport: "
+        "jump range now 8.39 -> 8.47 ly (+0.08); "
+        "unladen mass 1122.0 -> 1110.0 t (-12.00); power margin 5.72 MW."
+    )
+    assert "None" not in result["summary"]

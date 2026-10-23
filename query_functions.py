@@ -482,11 +482,12 @@ def _round2(value):
 
 def _fitted_fsd_params(conn):
     """The fitted frame shift drive's jump-range inputs -- {"item", "optmass",
-    "maxfuel", "fuelmul", "fuelpower", "booster_bonus"} -- or None when the
-    FSD isn't in module_stats at all. Prefers the journal's own engineered
-    FSDOptimalMass over the base value (ground truth for a module the
-    commander really has fitted). booster_bonus is the flat ly bonus of a
-    fitted Guardian FSD Booster, 0.0 when there is none.
+    "base_optmass", "maxfuel", "fuelmul", "fuelpower", "booster_bonus"} -- or
+    None when the FSD isn't in module_stats at all. optmass prefers the
+    journal's own engineered FSDOptimalMass over the base value (ground truth
+    for a module the commander really has fitted); base_optmass is the base
+    value alone. booster_bonus is the flat ly bonus of a fitted Guardian FSD
+    Booster, 0.0 when there is none.
 
     Any individual stat can still be None (a module_stats row missing a
     field): callers must treat that as "unknown jump range", never as 0."""
@@ -502,7 +503,8 @@ def _fitted_fsd_params(conn):
     # mass/power but wrong here -- a ~0 optmass would give a jump range of
     # ~0, not "unknown".
     engineered_optmass = _engineered_modifier(fsd_row["engineering_modifiers_json"], "FSDOptimalMass")
-    optmass = engineered_optmass if engineered_optmass is not None else new_module_extra_get(fsd_row, "optmass")
+    base_optmass = new_module_extra_get(fsd_row, "optmass")
+    optmass = engineered_optmass if engineered_optmass is not None else base_optmass
     booster_row = conn.execute(
         "SELECT ms.extra_json FROM current_loadout_modules clm "
         "JOIN module_stats ms ON ms.symbol = lower(clm.item) WHERE ms.grp = 'gfsb'"
@@ -510,6 +512,7 @@ def _fitted_fsd_params(conn):
     return {
         "item": fsd_row["item"],
         "optmass": optmass,
+        "base_optmass": base_optmass,  # the un-engineered module_stats value; the jump check needs it
         "maxfuel": new_module_extra_get(fsd_row, "maxfuel"),
         "fuelmul": new_module_extra_get(fsd_row, "fuelmul"),
         "fuelpower": new_module_extra_get(fsd_row, "fuelpower"),
@@ -545,8 +548,9 @@ def _current_ship_state(conn, params):
     state = _read_ship_state(conn)
     fuel = state["fuel_main"] if state else None
     cargo = state["cargo_count"] if state else None
-    capacity_row = conn.execute("SELECT fuel_main FROM current_loadout WHERE id = 1").fetchone()
-    capacity = capacity_row["fuel_main"] if capacity_row else None
+    loadout_row = conn.execute("SELECT fuel_main, unladen_mass FROM current_loadout WHERE id = 1").fetchone()
+    capacity = loadout_row["fuel_main"] if loadout_row else None
+    unladen = loadout_row["unladen_mass"] if loadout_row else None
 
     if fuel is None:
         note = "current fuel isn't known yet (no refuel, jump or load event seen since the ship changed)"
@@ -556,6 +560,9 @@ def _current_ship_state(conn, params):
         # Fuel outside [0, tank capacity] means the tracked level came from a
         # ship we've since left without seeing the change.
         note = "the tracked fuel level doesn't fit this ship's tank, so it's probably stale"
+    elif unladen is None:
+        # every mass figure is unladen + something; checked before any arithmetic
+        note = "the ship's empty mass isn't known yet"
     elif not _fsd_params_complete(params):
         note = "the fitted frame shift drive isn't in Ellie's module data"
     else:
@@ -572,9 +579,20 @@ def _jump_check_warning(conn, params):
     0.01 t, 97% within 0.5 t) and the commander is told so. Returns the
     warning sentence, or None -- also None, silently, when the last jump is
     missing a number the check needs, was boosted (injection changes the
-    jump), or was made with a different drive than the one fitted now."""
+    jump), or was made with a different drive than the one fitted now.
+
+    The optimal mass used is the one in force AT the jump (the snapshot's
+    last_jump_fsd_optmass if the drive was engineered then, else the base
+    value), not the drive's current one: engineering a drive changes its
+    optimal mass without changing its item symbol, and judging an old jump
+    by the new mass would blame Ellie's model for a drive that never made it."""
     state = _read_ship_state(conn)
     if state is None or not _fsd_params_complete(params):
+        return None
+    jump_optmass = state["last_jump_fsd_optmass"]
+    if jump_optmass is None:
+        jump_optmass = params["base_optmass"]
+    if jump_optmass is None:
         return None
     dist, used = state["last_jump_dist"], state["last_jump_fuel_used"]
     if dist is None or used is None or dist <= 0 or used <= 0:
@@ -585,7 +603,7 @@ def _jump_check_warning(conn, params):
         return None
     if state["last_jump_fsd_item"] != params["item"]:
         return None
-    implied = params["optmass"] * (used / params["fuelmul"]) ** (1 / params["fuelpower"]) / dist
+    implied = jump_optmass * (used / params["fuelmul"]) ** (1 / params["fuelpower"]) / dist
     modeled = state["last_jump_unladen"] + state["last_jump_fuel_before"] + state["last_jump_cargo"]
     if abs(implied - modeled) <= 1.0:
         return None
@@ -617,7 +635,8 @@ def get_current_loadout() -> dict:
         ).fetchall()
         params = _fitted_fsd_params(conn)
         fuel_now, cargo_now, usable, state_note = _current_ship_state(conn, params)
-        warning = _jump_check_warning(conn, params)
+        # the warning qualifies the current-load range, so it goes with it
+        warning = _jump_check_warning(conn, params) if usable else None
         ship_row = _resolve_ship_stats(conn, status["ship_key"])
     finally:
         conn.close()
@@ -651,16 +670,15 @@ def get_current_loadout() -> dict:
     # computed from the raw tracked values above; only what's reported is rounded
     fuel_now, cargo_now = _round2(fuel_now), _round2(cargo_now)
 
+    # a missing journal MaxJumpRange leaves the max clause out rather than print "None"
     if usable:
-        summary = (
-            f"{ship_name}: jump range now {jump_range_now} ly (fuel {fuel_now} t, cargo {cargo_now} t, "
-            f"mass {mass_now} t); max {jump_range_max} ly with an empty hold and one jump of fuel."
-        )
+        summary = f"{ship_name}: jump range now {jump_range_now} ly (fuel {fuel_now} t, cargo {cargo_now} t, mass {mass_now} t)"
+        summary += f"; max {jump_range_max} ly with an empty hold and one jump of fuel." if jump_range_max is not None else "."
     else:
-        summary = (
-            f"{ship_name}: max jump range {jump_range_max} ly (empty hold, one jump of fuel). "
-            f"Current-load jump range unavailable: {state_note}."
-        )
+        summary = f"{ship_name}: "
+        if jump_range_max is not None:
+            summary += f"max jump range {jump_range_max} ly (empty hold, one jump of fuel). "
+        summary += f"Current-load jump range unavailable: {state_note}."
     if warning:
         summary += " " + warning
 
@@ -1180,14 +1198,17 @@ def _swap_summary(result):
         clauses.append(before_after(
             "max", result["old_jump_range_max"], result["new_jump_range_max"],
             result["jump_range_change_max"], "ly"))
-    clauses.append(before_after(
-        "unladen mass", result["old_unladen_mass"], result["new_unladen_mass"], result["mass_change"], "t"))
+    if result["old_unladen_mass"] is not None and result["new_unladen_mass"] is not None:
+        clauses.append(before_after(
+            "unladen mass", result["old_unladen_mass"], result["new_unladen_mass"], result["mass_change"], "t"))
     if result["new_power_margin"] is not None:
         clauses.append(f"power margin {text(result['new_power_margin'])} MW")
 
     summary = f"{result['ship_name']}: {action} in {result['slot']}: " + "; ".join(clauses) + "."
     if result["state_note"]:
         summary += f" Current-load jump range unavailable: {result['state_note']}."
+    if result.get("warning"):
+        summary += " " + result["warning"]
     return summary
 
 
@@ -1384,8 +1405,12 @@ def simulate_module_swap(module_group: str, module_class: int, module_rating: st
 
         mass_change_min = new_mass_min - old_mass
         mass_change_max = new_mass_max - old_mass
-        new_unladen_min = baseline["unladen_mass"] + mass_change_min
-        new_unladen_max = baseline["unladen_mass"] + mass_change_max
+        # a journal Loadout without UnladenMass leaves every mass figure unknown
+        if baseline["unladen_mass"] is None:
+            new_unladen_min = new_unladen_max = None
+        else:
+            new_unladen_min = baseline["unladen_mass"] + mass_change_min
+            new_unladen_max = baseline["unladen_mass"] + mass_change_max
         power_change_min = new_power_min - old_power
         power_change_max = new_power_max - old_power
 
@@ -1431,7 +1456,7 @@ def simulate_module_swap(module_group: str, module_class: int, module_rating: st
             ).fetchone()
             booster_bonus = (new_module_extra_get(booster_row, "jumpboost") if booster_row else None) or 0.0
 
-        if None in (fsd_maxfuel, fsd_fuelmul, fsd_fuelpower, optmass_min):
+        if None in (fsd_maxfuel, fsd_fuelmul, fsd_fuelpower, optmass_min, new_unladen_min):
             new_range_min = new_range_max = None
         else:
             new_range_min = compute_jump_range(new_unladen_max, optmass_min, fsd_maxfuel, fsd_fuelmul, fsd_fuelpower, booster_bonus)
@@ -1490,7 +1515,7 @@ def simulate_module_swap(module_group: str, module_class: int, module_rating: st
             },
             "mass_change": _min_max_or_single(mass_change_min, mass_change_max),
             "old_unladen_mass": _round2(baseline["unladen_mass"]),
-            "new_unladen_mass": _min_max_or_single(new_unladen_min, new_unladen_max),
+            "new_unladen_mass": _min_max_or_single(new_unladen_min, new_unladen_max) if new_unladen_min is not None else None,
             "fuel_now": _round2(fuel_now),
             "cargo_now": _round2(cargo_now),
             "state_note": state_note,  # why the *_jump_range_now figures are None, when they are
@@ -1512,6 +1537,11 @@ def simulate_module_swap(module_group: str, module_class: int, module_rating: st
                 f"{target_slot} isn't fitted in your current loadout, so Ellie can't confirm "
                 "it's an empty slot on your ship -- these numbers assume it is"
             )
+        # same honesty guard as get_current_loadout, on the same terms: only
+        # alongside a current-load figure it qualifies
+        warning = _jump_check_warning(conn, fitted_fsd) if old_range_now is not None else None
+        if warning:
+            result["warning"] = warning
         result["summary"] = _swap_summary(result)
         return result
     finally:

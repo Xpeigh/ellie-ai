@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import query_functions as qf
 import journal_watcher as jw
 import ingest_ship_modules as ism
+from loadout_calc import compute_current_jump_range
 
 REPO = Path(__file__).resolve().parent.parent / "coriolis-data"
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
@@ -324,14 +325,18 @@ def test_jump_check_warns_when_the_mass_model_is_off(tmp_path):
     assert result["jump_range_now"] == 8.39  # the numbers are still given; the warning qualifies them
 
 
-def test_jump_check_warning_goes_on_the_unusable_summary_too(tmp_path):
+def test_jump_check_warning_is_withheld_when_there_is_no_current_range(tmp_path):
+    """The warning qualifies the jump ranges we give; with fuel unknown there is
+    no jump_range_now to qualify, and warning about a mass model nobody is
+    using would only cast doubt on the game's own MaxJumpRange."""
     path = _type9_now(tmp_path, fuel=None, cargo=None)
-    _set_ship_state(path, **{**_consistent_last_jump(), "last_jump_cargo": 400})
+    _set_ship_state(path, **{**_consistent_last_jump(), "last_jump_cargo": 400})  # would fire
     result = qf.get_current_loadout()
-    assert result["warning"] == OFF_BY_300
+    assert result["jump_range_now"] is None
+    assert "warning" not in result
     assert result["summary"] == (
         f"Type-9 Heavy: max jump range 9.16 ly (empty hold, one jump of fuel). "
-        f"Current-load jump range unavailable: {FUEL_UNKNOWN}. " + OFF_BY_300
+        f"Current-load jump range unavailable: {FUEL_UNKNOWN}."
     )
 
 
@@ -418,3 +423,143 @@ def test_every_number_in_the_summary_is_in_the_structured_result(tmp_path, fuel,
                  if isinstance(v, (int, float)) and not isinstance(v, bool)}
     assert in_summary, "the summary should contain numbers"
     assert [n for n in in_summary if n not in in_result] == []
+
+
+# --- fix round 1: the jump check judges the drive that made the jump ---------
+
+def _type9_event(fsd_optmass=None):
+    """The Type-9 fixture Loadout, optionally with its drive engineered to the
+    given FSDOptimalMass (engineering changes the optimal mass, not the item)."""
+    event = json.load(open(FIXTURES / "type9_loadout_2026-01-04.json"))
+    if fsd_optmass is not None:
+        for module in event["Modules"]:
+            if module["Slot"] == "FrameShiftDrive":
+                module["Engineering"] = {
+                    "BlueprintName": "FSD_LongRange", "Level": 5, "Quality": 0.6,
+                    "Modifiers": [{"Label": "FSDOptimalMass", "Value": fsd_optmass, "OriginalValue": 960.0, "LessIsGood": 0}],
+                }
+    return event
+
+
+def _process(path, *events):
+    conn = sqlite3.connect(path)
+    for event in events:
+        jw.process_event(conn, event)
+    conn.close()
+
+
+def test_re_engineering_the_drive_after_a_jump_does_not_blame_the_mass_model(tmp_path):
+    """A consistent jump with the stock drive, then the same drive symbol
+    engineered to FSDOptimalMass 1488: the jump was made with 960, and the
+    range now is computed with 1488."""
+    path = _type9_now(tmp_path, fuel=10.0, cargo=100)
+    _set_ship_state(path, **_consistent_last_jump())
+    _process(path, _type9_event(1488.0))
+    result = qf.get_current_loadout()
+    assert "warning" not in result
+    assert "may be inaccurate" not in result["summary"]
+    assert result["jump_range_now"] == 13.0     # 1488 * (5.3/0.011)**(1/2.6) / 1232 = 12.9978
+    assert result["jump_range_now"] == round(compute_current_jump_range(1122.0, 10.0, 100, 1488.0, 5.3, 0.011, 2.6), 2)
+
+
+def test_a_jump_made_with_an_engineered_drive_is_judged_by_that_drive(tmp_path):
+    """The reverse: the jump happens while the drive is engineered (optmass
+    1488), then a Loadout shows it stock again. The snapshot's own optimal
+    mass is what the game burned fuel against."""
+    path = _type9_db(tmp_path)
+    mass = 1122.0 + 10.0 + 100
+    dist = 1488.0 * (5.3 / TYPE9_FUELMUL) ** (1 / TYPE9_FUELPOWER) / mass
+    _process(
+        path,
+        _type9_event(1488.0),
+        {"event": "LoadGame", "Ship": "Type9", "ShipID": 43, "FuelLevel": 10.0, "FuelCapacity": 64.0},
+        {"event": "Cargo", "Vessel": "Ship", "Count": 100},
+        {"event": "FSDJump", "StarSystem": "Sol", "StarPos": [0.0, 0.0, 0.0], "timestamp": "2026-10-23T09:34:43Z",
+         "JumpDist": dist, "FuelUsed": 5.3, "FuelLevel": 4.7},
+        _type9_event(),   # no longer engineered
+    )
+    result = qf.get_current_loadout()
+    assert result["fuel_now"] == 4.7 and result["cargo_now"] == 100
+    assert "warning" not in result
+    assert "may be inaccurate" not in result["summary"]
+
+
+def test_a_wrong_mass_model_still_warns_when_the_drive_changed_since(tmp_path):
+    """The snapshot optmass must not turn the check off: same engineered-then-
+    stock flow as above, but the remembered cargo is 300 t off."""
+    path = _type9_db(tmp_path)
+    mass = 1122.0 + 10.0 + 100
+    dist = 1488.0 * (5.3 / TYPE9_FUELMUL) ** (1 / TYPE9_FUELPOWER) / mass
+    _process(
+        path,
+        _type9_event(1488.0),
+        {"event": "LoadGame", "Ship": "Type9", "ShipID": 43, "FuelLevel": 10.0, "FuelCapacity": 64.0},
+        {"event": "Cargo", "Vessel": "Ship", "Count": 400},   # the game burned fuel for 100 t, we remember 400
+        {"event": "FSDJump", "StarSystem": "Sol", "StarPos": [0.0, 0.0, 0.0], "timestamp": "2026-10-23T09:34:43Z",
+         "JumpDist": dist, "FuelUsed": 5.3, "FuelLevel": 4.7},
+        _type9_event(),
+    )
+    assert qf.get_current_loadout()["warning"] == OFF_BY_300
+
+
+def test_a_ship_change_discards_the_old_jump_so_a_look_alike_drive_is_not_judged_by_it(tmp_path):
+    """A consistent jump, a swap to another Type-9 whose drive (same symbol)
+    is engineered to 1200, fuel and cargo known again: nothing to compare
+    against, so no warning about a jump this ship never made."""
+    path = _type9_now(tmp_path, fuel=10.0, cargo=100)
+    _set_ship_state(path, **_consistent_last_jump())
+    _process(path, {"event": "ShipyardSwap", "ShipType": "type9", "ShipID": 44}, _type9_event(1200.0))
+    _set_ship_state(path, fuel_main=10.0, cargo_count=100)
+    conn = sqlite3.connect(path)
+    snapshot = conn.execute("SELECT last_jump_dist, last_jump_fuel_used, last_jump_fsd_item, last_jump_fsd_optmass FROM ship_state").fetchone()
+    conn.close()
+    assert snapshot == (None, None, None, None)
+    result = qf.get_current_loadout()
+    assert result["state_note"] is None
+    assert "warning" not in result
+    assert result["jump_range_now"] == round(compute_current_jump_range(1122.0, 10.0, 100, 1200.0, 5.3, 0.011, 2.6), 2)
+
+
+# --- fix round 1: never crash, never print "None" ----------------------------
+
+NO_EMPTY_MASS = "the ship's empty mass isn't known yet"
+
+
+def _null_loadout_column(path, column):
+    conn = sqlite3.connect(path)
+    conn.execute(f"UPDATE current_loadout SET {column} = NULL WHERE id = 1")
+    conn.commit()
+    conn.close()
+
+
+def test_unknown_empty_mass_makes_the_current_range_unavailable_instead_of_crashing(tmp_path):
+    path = _type9_now(tmp_path, fuel=10.0, cargo=100)
+    _null_loadout_column(path, "unladen_mass")
+    result = qf.get_current_loadout()
+    assert result["found"] is True
+    assert result["jump_range_now"] is None
+    assert result["mass_now"] is None and result["fuel_now"] is None and result["cargo_now"] is None
+    assert result["unladen_mass"] is None
+    assert result["state_note"] == NO_EMPTY_MASS
+    assert result["summary"] == (
+        f"Type-9 Heavy: max jump range 9.16 ly (empty hold, one jump of fuel). "
+        f"Current-load jump range unavailable: {NO_EMPTY_MASS}."
+    )
+
+
+def test_unknown_max_jump_range_leaves_the_max_clause_out(tmp_path):
+    path = _type9_now(tmp_path, fuel=10.0, cargo=100)
+    _null_loadout_column(path, "max_jump_range")
+    result = qf.get_current_loadout()
+    assert result["jump_range_max"] is None
+    assert result["jump_range_now"] == 8.39
+    assert result["summary"] == "Type-9 Heavy: jump range now 8.39 ly (fuel 10.0 t, cargo 100 t, mass 1232.0 t)."
+    assert "None" not in result["summary"]
+
+
+def test_unknown_max_jump_range_with_an_unusable_state(tmp_path):
+    path = _type9_now(tmp_path, fuel=None, cargo=100)
+    _null_loadout_column(path, "max_jump_range")
+    result = qf.get_current_loadout()
+    assert result["summary"] == f"Type-9 Heavy: Current-load jump range unavailable: {FUEL_UNKNOWN}."
+    assert "None" not in result["summary"]
