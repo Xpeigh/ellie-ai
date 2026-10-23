@@ -2,3 +2,5 @@ ollama
 openpyxl
 ijson
 requests
+fastapi
+uvicorn

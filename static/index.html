@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="violet">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ellie</title>
+<link rel="preload" href="/static/fonts/Electrolize-Regular.woff2" as="font" type="font/woff2" crossorigin>
+<script>
+  // apply the saved theme before first paint so there is no flash of the wrong palette
+  try {
+    var t = localStorage.getItem("ellie-theme");
+    if (t === "violet" || t === "orange") document.documentElement.dataset.theme = t;
+  } catch (e) {}
+</script>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<div class="app">
+
+  <header class="topbar">
+    <h1 class="brand">ELLIE</h1>
+
+    <div class="conn" id="connIndicator" data-state="connecting" role="status">
+      <span class="conn__dot" aria-hidden="true"></span>
+      <span class="conn__label" id="connLabel">CONNECTING</span>
+    </div>
+
+    <div class="topbar__spacer"></div>
+
+    <div class="balance" aria-label="Credit balance">
+      <svg class="balance__icon" viewBox="0 0 20 20" aria-hidden="true">
+        <path d="M10 2 L18 17 H2 Z M10 8 L13.6 15 H6.4 Z" fill="currentColor" fill-rule="evenodd"/>
+      </svg>
+      <span class="balance__label">BALANCE</span>
+      <span class="balance__value" id="credits">&mdash;</span>
+      <span class="balance__unit">CR</span>
+    </div>
+
+    <button class="btn" id="themeBtn" type="button" aria-label="Switch color theme">THEME</button>
+    <button class="btn statuspanel-toggle" id="statusToggle" type="button" aria-expanded="false" aria-controls="statuspanel">STATUS</button>
+  </header>
+
+  <main class="main">
+
+    <section class="console" aria-label="Conversation with Ellie">
+      <div class="console__head">
+        <h2 class="title">CONVERSATION</h2>
+        <button class="btn" id="resetBtn" type="button">NEW CONVERSATION</button>
+      </div>
+
+      <div class="log" id="log" role="log" aria-live="polite"></div>
+
+      <form class="inputbar" id="chatForm" autocomplete="off">
+        <span class="inputbar__mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><path d="M8 4 L17 12 L8 20" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="square"/></svg>
+        </span>
+        <input
+          type="text"
+          id="chatInput"
+          class="inputbar__field"
+          placeholder="Ask about a blueprint, a material, an engineer, or your status"
+          aria-label="Message to Ellie"
+          maxlength="500"
+          autofocus
+        >
+        <button type="submit" class="inputbar__send" id="sendBtn">SEND</button>
+      </form>
+    </section>
+
+    <aside class="statuspanel" id="statuspanel" aria-label="Commander status">
+
+      <section id="panelIdentity">
+        <h2 class="title">COMMANDER</h2>
+        <div class="big" id="cmdrName">&mdash;</div>
+        <div class="sub" id="cmdrShip">&mdash;</div>
+      </section>
+
+      <section id="panelLocation">
+        <h2 class="title">LOCATION</h2>
+        <div class="big" id="curSystem">&mdash;</div>
+        <div class="sub" id="curStation"></div>
+        <span class="state" id="dockedStatus" data-docked="unknown">&mdash;</span>
+      </section>
+
+      <section id="panelRanks">
+        <h2 class="title">RANKS</h2>
+        <div class="rows" id="ranks"></div>
+      </section>
+
+      <section id="panelMaterials">
+        <h2 class="title">MATERIALS</h2>
+        <div class="rows rows--stack" id="materials"></div>
+      </section>
+
+      <section class="notice" id="panelNotice" hidden>
+        <h2 class="title">SETUP NEEDED</h2>
+        <div class="notice__text" id="noticeText"></div>
+      </section>
+
+    </aside>
+
+    <div class="statuspanel-backdrop" id="statuspanelBackdrop"></div>
+
+  </main>
+
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
