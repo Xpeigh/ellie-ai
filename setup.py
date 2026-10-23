@@ -47,6 +47,7 @@ STEP_TABLES = {
     "Coriolis (blueprint/experimental-effect fallback data)": [
         "coriolis_blueprints", "coriolis_experimental_effects",
     ],
+    "Ship/module stats (loadout calculator)": ["ship_stats", "module_stats", "module_blueprints"],
     "EDSM (system distances)": [
         "edsm_systems", "edsm_stations",
     ],
@@ -160,6 +161,38 @@ def setup_coriolis():
     return True
 
 
+def setup_ship_modules():
+    _heading("Ship & module stats (loadout calculator)")
+    existing = _table_count("ship_stats")
+    if existing:
+        print(f"ship_stats already has {existing} rows.")
+        if not _ask_yes_no("Re-ingest anyway?", default=False):
+            print("Skipped.")
+            return True
+
+    if not CORIOLIS_MARKER.exists():
+        print("Coriolis data isn't cloned yet -- run the Coriolis step above first.")
+        return False
+
+    sys.path.insert(0, str(SCRIPT_DIR))
+    try:
+        import ingest_ship_modules as ism
+    except ImportError as e:
+        print(f"Missing a required package ({e}). Install everything this needs with: pip install -r requirements.txt")
+        return False
+
+    conn = sqlite3.connect(DB_PATH)
+    ism.build_schema(conn)
+    ship_count = ism.build_ships(conn, str(CORIOLIS_DIR))
+    module_count = ism.build_modules(conn, str(CORIOLIS_DIR))
+    blueprint_count = ism.build_module_blueprints(conn, str(CORIOLIS_DIR))
+    conn.close()
+    print(f"ship_stats: {ship_count} rows")
+    print(f"module_stats: {module_count} rows")
+    print(f"module_blueprints: {blueprint_count} rows")
+    return True
+
+
 def setup_edsm():
     _heading("EDSM data (system distances)")
     existing = _table_count("edsm_systems")
@@ -239,6 +272,7 @@ def main():
     ensure_live_tables()
     check_ollama()
     setup_coriolis()
+    setup_ship_modules()
     setup_edsm()
     setup_excel()
     verify()
