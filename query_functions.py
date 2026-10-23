@@ -236,14 +236,41 @@ FEDERATION_RANKS = ["None", "Recruit", "Cadet", "Midshipman", "Petty Officer", "
 EMPIRE_RANKS = ["None", "Outsider", "Serf", "Master", "Squire", "Knight", "Lord", "Baron", "Viscount", "Count",
                 "Earl", "Marquis", "Duke", "Prince", "King"]
 
+# Frontier added "prestige" tiers beyond the original Elite cap (Odyssey
+# era) for the four ladders that top out at "Elite" -- Combat, Trade,
+# Exploration, CQC. The documented journal manual above doesn't cover
+# this (it was written before/without that update), so this table isn't
+# sourced the same verified way as the rest -- found via Ben's own real
+# commander data (trade_rank: 9, which the base 9-entry table above has
+# no slot for) plus Frontier's own forums confirming "Elite I" through
+# "Elite V" exist as named prestige tiers. The exact journal INTEGER for
+# each tier is inferred (the obvious sequential extension: 8=Elite,
+# 9=Elite I, ..., 13=Elite V), not confirmed against an official source --
+# worth re-checking if a commander at Elite II+ ever reports a name that
+# looks off.
+_ELITE_PLUS = {9: "Elite I", 10: "Elite II", 11: "Elite III", 12: "Elite IV", 13: "Elite V"}
+
 
 def _rank_name(table, value):
+    """table[value], with a fallback for the Elite-plus prestige tiers
+    (see _ELITE_PLUS above) on the four ladders that actually end in
+    "Elite" -- Federation/Empire end in "Admiral"/"King" and never hit
+    this path. A value this function doesn't recognize is labeled
+    honestly rather than guessed at or silently dropped."""
     if value is None:
         return None
     try:
-        return table[int(value)]
-    except (ValueError, IndexError):
-        return None  # out-of-range rather than guessing a name
+        value = int(value)
+    except (ValueError, TypeError):
+        return None
+    if 0 <= value < len(table):
+        return table[value]
+    if table[-1] == "Elite":
+        if value in _ELITE_PLUS:
+            return _ELITE_PLUS[value]
+        if value > max(_ELITE_PLUS):
+            return f"Elite (prestige rank {value}, beyond the confirmed Elite I-V range)"
+    return None  # genuinely out of range for a ladder that doesn't extend (Federation/Empire)
 
 
 def player_state() -> dict:
