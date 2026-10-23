@@ -4,3 +4,4 @@ ijson
 requests
 fastapi
 uvicorn
+pytest
