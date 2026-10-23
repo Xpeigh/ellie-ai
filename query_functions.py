@@ -1151,6 +1151,46 @@ def _effective_plant_output(conn, target_slot, new_module, features):
     return pgen, pgen
 
 
+def _swap_summary(result):
+    """One sentence with the whole before/after, built FROM the structured
+    result so every number in it is, by construction, one the result also
+    carries (rounded to 2 dp). Clauses whose figures are unknown are left
+    out; a roll-dependent {"min", "max"} value reads "between X and Y" and
+    gets no change in parentheses, since there is no single change."""
+    def text(value):
+        return f"between {value['min']} and {value['max']}" if isinstance(value, dict) else str(value)
+
+    def change_text(change, new):
+        if isinstance(change, dict) or isinstance(new, dict):
+            return ""
+        return f" ({change + 0.0:+.2f})"  # + 0.0 so a rounded -0.0 prints as +0.00
+
+    def before_after(label, old, new, change, unit):
+        return f"{label} {old} -> {text(new)} {unit}{change_text(change, new)}"
+
+    added = result["added"]["symbol"]
+    removed = result["removed"]["item"]
+    action = f"swapping {removed} for {added}" if removed else f"adding {added}"
+    clauses = []
+    if result["old_jump_range_now"] is not None and result["new_jump_range_now"] is not None:
+        clauses.append(before_after(
+            "jump range now", result["old_jump_range_now"], result["new_jump_range_now"],
+            result["jump_range_change_now"], "ly"))
+    if result["old_jump_range_max"] is not None and result["new_jump_range_max"] is not None:
+        clauses.append(before_after(
+            "max", result["old_jump_range_max"], result["new_jump_range_max"],
+            result["jump_range_change_max"], "ly"))
+    clauses.append(before_after(
+        "unladen mass", result["old_unladen_mass"], result["new_unladen_mass"], result["mass_change"], "t"))
+    if result["new_power_margin"] is not None:
+        clauses.append(f"power margin {text(result['new_power_margin'])} MW")
+
+    summary = f"{result['ship_name']}: {action} in {result['slot']}: " + "; ".join(clauses) + "."
+    if result["state_note"]:
+        summary += f" Current-load jump range unavailable: {result['state_note']}."
+    return summary
+
+
 @_needs_setup
 def simulate_module_swap(module_group: str, module_class: int, module_rating: str,
                           blueprint_name: str = None, grade: int = None, slot: str = None,
@@ -1356,6 +1396,7 @@ def simulate_module_swap(module_group: str, module_class: int, module_rating: st
         # module (+ blueprint, if given); otherwise it's the CURRENT fsd's
         # real reported stats (preferring the journal's own engineering
         # values over recomputed blueprint math -- see Global Constraints).
+        fitted_fsd = _fitted_fsd_params(conn)
         if target_slot == STANDARD_SLOT_NAMES["fsd"]:
             fsd_optmass = new_module_extra_get(new_module, "optmass")
             fsd_maxfuel = new_module_extra_get(new_module, "maxfuel")
@@ -1366,7 +1407,6 @@ def simulate_module_swap(module_group: str, module_class: int, module_rating: st
             else:
                 optmass_min = optmass_max = fsd_optmass
         else:
-            fitted_fsd = _fitted_fsd_params(conn)
             fsd_maxfuel = fitted_fsd["maxfuel"] if fitted_fsd else None
             fsd_fuelmul = fitted_fsd["fuelmul"] if fitted_fsd else None
             fsd_fuelpower = fitted_fsd["fuelpower"] if fitted_fsd else None
@@ -1397,6 +1437,31 @@ def simulate_module_swap(module_group: str, module_class: int, module_rating: st
             new_range_min = compute_jump_range(new_unladen_max, optmass_min, fsd_maxfuel, fsd_fuelmul, fsd_fuelpower, booster_bonus)
             new_range_max = compute_jump_range(new_unladen_min, optmass_max, fsd_maxfuel, fsd_fuelmul, fsd_fuelpower, booster_bonus)
 
+        # The same swap with the fuel and cargo the ship has NOW (unchanged by
+        # the swap). "old" is the CURRENT ship, with the FSD and booster it
+        # really has fitted; "new" reuses the unladen mass, FSD and booster
+        # resolved above for the maximum figure.
+        fuel_now, cargo_now, state_usable, state_note = _current_ship_state(conn, fitted_fsd)
+        old_range_now = new_range_now_min = new_range_now_max = None
+        if state_usable:
+            old_range_now = compute_current_jump_range(
+                baseline["unladen_mass"], fuel_now, cargo_now, fitted_fsd["optmass"], fitted_fsd["maxfuel"],
+                fitted_fsd["fuelmul"], fitted_fsd["fuelpower"], fitted_fsd["booster_bonus"],
+            )
+            if new_range_min is not None:
+                new_range_now_min = compute_current_jump_range(
+                    new_unladen_max, fuel_now, cargo_now, optmass_min, fsd_maxfuel, fsd_fuelmul, fsd_fuelpower, booster_bonus,
+                )
+                new_range_now_max = compute_current_jump_range(
+                    new_unladen_min, fuel_now, cargo_now, optmass_max, fsd_maxfuel, fsd_fuelmul, fsd_fuelpower, booster_bonus,
+                )
+        old_range_max = baseline["max_jump_range"]  # the game's own MaxJumpRange
+        range_change_max = range_change_now = None
+        if new_range_min is not None and old_range_max is not None:
+            range_change_max = _min_max_or_single(new_range_min - old_range_max, new_range_max - old_range_max)
+        if new_range_now_min is not None:
+            range_change_now = _min_max_or_single(new_range_now_min - old_range_now, new_range_now_max - old_range_now)
+
         # R7: power margin on a DEPLOYED basis -- effective plant output minus
         # every currently-On module's draw (target slot's old module excluded,
         # the new module's draw added instead), hardpoints and the cargo
@@ -1414,6 +1479,7 @@ def simulate_module_swap(module_group: str, module_class: int, module_rating: st
         result = {
             "found": True,
             "compatible": True,
+            "ship_name": ship_row["name"] if ship_row else baseline["ship_key"],
             "slot": target_slot,
             "removed": {"item": old_module_row["item"] if old_module_row else None},
             "added": {
@@ -1423,8 +1489,17 @@ def simulate_module_swap(module_group: str, module_class: int, module_rating: st
                 "power": _min_max_or_single(new_power_min, new_power_max),
             },
             "mass_change": _min_max_or_single(mass_change_min, mass_change_max),
+            "old_unladen_mass": _round2(baseline["unladen_mass"]),
             "new_unladen_mass": _min_max_or_single(new_unladen_min, new_unladen_max),
-            "new_jump_range": _min_max_or_single(new_range_min, new_range_max) if new_range_min is not None else None,
+            "fuel_now": _round2(fuel_now),
+            "cargo_now": _round2(cargo_now),
+            "state_note": state_note,  # why the *_jump_range_now figures are None, when they are
+            "old_jump_range_now": _round2(old_range_now),
+            "new_jump_range_now": _min_max_or_single(new_range_now_min, new_range_now_max) if new_range_now_min is not None else None,
+            "jump_range_change_now": range_change_now,
+            "old_jump_range_max": _round2(old_range_max),
+            "new_jump_range_max": _min_max_or_single(new_range_min, new_range_max) if new_range_min is not None else None,
+            "jump_range_change_max": range_change_max,
             "power_change": _min_max_or_single(power_change_min, power_change_max),
             "new_power_margin": new_power_margin,
             "power_unknown_modules": unknown_power_items,  # honestly-reported, never silently dropped
@@ -1437,6 +1512,7 @@ def simulate_module_swap(module_group: str, module_class: int, module_rating: st
                 f"{target_slot} isn't fitted in your current loadout, so Ellie can't confirm "
                 "it's an empty slot on your ship -- these numbers assume it is"
             )
+        result["summary"] = _swap_summary(result)
         return result
     finally:
         conn.close()

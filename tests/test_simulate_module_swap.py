@@ -1,13 +1,17 @@
 import json
+import re
 import sqlite3
 import sys
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import query_functions as qf
 import journal_watcher as jw
 import ingest_ship_modules as ism
 import ingest_coriolis as ic
+from loadout_calc import compute_current_jump_range, compute_jump_range
 
 REPO = Path(__file__).resolve().parent.parent / "coriolis-data"
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
@@ -97,7 +101,7 @@ def test_swap_unengineered_module_reports_deltas(tmp_path):
     assert result["slot"] == "FrameShiftDrive"
     assert result["mass_change"] == -48.0
     assert abs(result["new_unladen_mass"] - 1238.30) < 0.01
-    assert abs(result["new_jump_range"] - 47.15) < 0.01
+    assert abs(result["new_jump_range_max"] - 47.15) < 0.01
     assert abs(result["power_change"] - (-0.16)) < 0.01
     assert abs(result["new_power_margin"] - 14.55) < 0.01
 
@@ -245,9 +249,9 @@ def test_guardian_fsd_booster_adds_flat_bonus_to_jump_range(tmp_path):
     assert without["found"] is True and with_booster["found"] is True
     # no blueprint on this swap, so both sides collapse to a plain float
     # (see _min_max_or_single) rather than a {"min","max"} dict
-    assert isinstance(without["new_jump_range"], (int, float))
-    assert isinstance(with_booster["new_jump_range"], (int, float))
-    assert abs((with_booster["new_jump_range"] - without["new_jump_range"]) - 6) < 0.01
+    assert isinstance(without["new_jump_range_max"], (int, float))
+    assert isinstance(with_booster["new_jump_range_max"], (int, float))
+    assert abs((with_booster["new_jump_range_max"] - without["new_jump_range_max"]) - 6) < 0.01
 
 
 def test_removed_booster_does_not_contribute_its_bonus(tmp_path):
@@ -265,7 +269,7 @@ def test_removed_booster_does_not_contribute_its_bonus(tmp_path):
         variant="int_cargorack_size4_class1", slot="Slot08_Size4",
     )
     assert result["found"] is True
-    assert abs(result["new_jump_range"] - 74.04) < 0.01
+    assert abs(result["new_jump_range_max"] - 74.04) < 0.01
 
 
 def test_standard_slot_rejects_wrong_group(tmp_path):
@@ -638,13 +642,13 @@ def test_missing_optmass_stays_none_not_zero(tmp_path):
     to remove it, then swaps something ELSE (life support, on the
     Type-9 fixture, whose FSD carries no journal Engineering block -- so
     the code must fall back to module_stats' base optmass, not a journal
-    override). new_jump_range must come back None, not a near-zero number
+    override). new_jump_range_max must come back None, not a near-zero number
     from routing that missing optmass through the NULL->0.0 helper that's
     correct for mass/power but wrong here.
 
     Confirmed genuinely RED on revert (see the fix-round-3 report): with
     the FSDOptimalMass lookup temporarily reverted to route through
-    _engineered_or_base, this test fails with new_jump_range ~= 0.0 in
+    _engineered_or_base, this test fails with new_jump_range_max ~= 0.0 in
     a {"min", "max"} dict, not None."""
     path = _type9_db(tmp_path)
     conn = sqlite3.connect(path)
@@ -663,7 +667,7 @@ def test_missing_optmass_stays_none_not_zero(tmp_path):
 
     result = qf.simulate_module_swap(module_group="life support", module_class=5, module_rating="E")
     assert result["found"] is True
-    assert result["new_jump_range"] is None
+    assert result["new_jump_range_max"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -715,3 +719,303 @@ def test_module_class_as_fractional_float_fails_cleanly(tmp_path):
     _db(tmp_path)
     result = qf.simulate_module_swap(module_group="life support", module_class=5.5, module_rating="D")
     assert result["found"] is False
+
+
+# ---------------------------------------------------------------------------
+# Current-load jump ranges, baselines and the pre-built summary.
+#
+# Why the result carries "old" figures and the ship's name: a real-model test
+# showed a 3B model told only the NEW range invented "your range expands" and
+# named the wrong ship. The summary is the same facts as one sentence.
+# ---------------------------------------------------------------------------
+
+FUEL_UNKNOWN = "current fuel isn't known yet (no refuel, jump or load event seen since the ship changed)"
+CARGO_UNKNOWN = "current cargo isn't known yet (the game hasn't reported the cargo hold since the ship changed)"
+FSD_UNKNOWN = "the fitted frame shift drive isn't in Ellie's module data"
+
+
+def _set_ship_state(path, **fields):
+    conn = sqlite3.connect(path)
+    cols = ", ".join(f"{k} = :{k}" for k in fields)
+    conn.execute(f"UPDATE ship_state SET {cols} WHERE id = 1", fields)
+    conn.commit()
+    conn.close()
+
+
+def _type9_now(tmp_path, fuel=10.0, cargo=100):
+    path = _type9_db(tmp_path)
+    _set_ship_state(path, fuel_main=fuel, cargo_count=cargo)
+    return path
+
+
+def _type9_fsd_swap():
+    """Stock 6E (optmass 960, maxfuel 5.3, fuelmul 0.011) -> standard 6A
+    (optmass 1800, maxfuel 8, fuelmul 0.012, fuelpower 2.6). Same 40 t, so
+    the unladen mass stays 1122.0."""
+    return qf.simulate_module_swap(
+        module_group="frame shift drive", module_class=6, module_rating="A",
+        variant="int_hyperdrive_size6_class5",
+    )
+
+
+def test_swap_carries_baselines_and_current_load_ranges(tmp_path):
+    _type9_now(tmp_path, fuel=10.0, cargo=100)
+    result = _type9_fsd_swap()
+    # every expected figure computed independently through loadout_calc
+    old_now = compute_current_jump_range(1122.0, 10.0, 100, 960, 5.3, 0.011, 2.6)
+    new_now = compute_current_jump_range(1122.0, 10.0, 100, 1800, 8, 0.012, 2.6)
+    new_max = compute_jump_range(1122.0, 1800, 8, 0.012, 2.6)
+    journal_max = 9.164523
+
+    assert result["found"] is True and result["compatible"] is True
+    assert result["ship_name"] == "Type-9 Heavy"
+    assert result["fuel_now"] == 10.0
+    assert result["cargo_now"] == 100
+    assert result["state_note"] is None
+    assert result["old_jump_range_now"] == 8.39 == round(old_now, 2)
+    assert result["new_jump_range_now"] == 17.81 == round(new_now, 2)
+    assert result["jump_range_change_now"] == 9.43 == round(new_now - old_now, 2)
+    assert result["old_jump_range_max"] == 9.16
+    assert result["new_jump_range_max"] == 19.42 == round(new_max, 2)
+    assert result["jump_range_change_max"] == 10.26 == round(new_max - journal_max, 2)
+    assert result["old_unladen_mass"] == 1122.0
+    assert result["new_unladen_mass"] == 1122.0
+    assert "new_jump_range" not in result  # renamed to new_jump_range_max
+
+
+def test_swap_old_current_range_is_the_same_figure_get_current_loadout_reports(tmp_path):
+    _type9_now(tmp_path, fuel=10.0, cargo=100)
+    swap = _type9_fsd_swap()
+    loadout = qf.get_current_loadout()
+    assert loadout["jump_range_now"] == 8.39
+    assert swap["old_jump_range_now"] == loadout["jump_range_now"]
+    assert swap["old_jump_range_max"] == loadout["jump_range_max"]
+    assert swap["ship_name"] == loadout["ship_name"]
+    assert swap["fuel_now"] == loadout["fuel_now"] and swap["cargo_now"] == loadout["cargo_now"]
+
+
+def test_swap_summary_exact_for_the_pinned_explorer_fsd_swap(tmp_path):
+    """The same scenario as test_swap_unengineered_module_reports_deltas
+    (the commander's real engineered Explorer NX FSD -> a stock 8A SCO), now
+    with 40.0 t of fuel and 4 t of cargo aboard. Expected ranges computed
+    independently through loadout_calc: now 71.8967 -> 46.2886 ly, max
+    73.964989 (journal) -> 47.1453 ly."""
+    path = _db(tmp_path)
+    _set_ship_state(path, fuel_main=40.0, cargo_count=4)
+    result = qf.simulate_module_swap(
+        module_group="frame shift drive", module_class=8, module_rating="A",
+        variant="int_hyperdrive_overcharge_size8_class5",
+    )
+    assert result["old_jump_range_now"] == 71.9
+    assert result["new_jump_range_now"] == 46.29
+    assert result["jump_range_change_now"] == -25.61
+    assert result["old_jump_range_max"] == 73.96
+    assert result["new_jump_range_max"] == 47.15
+    assert result["jump_range_change_max"] == -26.82
+    assert result["summary"] == (
+        "Caspian Explorer: swapping int_hyperdrive_overcharge_size8_class5_overchargebooster_mkii "
+        "for int_hyperdrive_overcharge_size8_class5 in FrameShiftDrive: "
+        "jump range now 71.9 -> 46.29 ly (-25.61); max 73.96 -> 47.15 ly (-26.82); "
+        "unladen mass 1286.3 -> 1238.3 t (-48.00); power margin 14.55 MW."
+    )
+
+
+def test_swap_with_unknown_fuel_drops_the_current_clause_and_says_why(tmp_path):
+    _db(tmp_path)  # a Loadout was seen but no fuel/cargo event yet
+    result = qf.simulate_module_swap(
+        module_group="frame shift drive", module_class=8, module_rating="A",
+        variant="int_hyperdrive_overcharge_size8_class5",
+    )
+    for key in ("fuel_now", "cargo_now", "old_jump_range_now", "new_jump_range_now", "jump_range_change_now"):
+        assert result[key] is None, key
+    assert result["state_note"] == FUEL_UNKNOWN
+    assert result["new_jump_range_max"] == 47.15  # the maximum figures are unaffected
+    assert result["summary"] == (
+        "Caspian Explorer: swapping int_hyperdrive_overcharge_size8_class5_overchargebooster_mkii "
+        "for int_hyperdrive_overcharge_size8_class5 in FrameShiftDrive: "
+        "max 73.96 -> 47.15 ly (-26.82); unladen mass 1286.3 -> 1238.3 t (-48.00); power margin 14.55 MW. "
+        f"Current-load jump range unavailable: {FUEL_UNKNOWN}."
+    )
+
+
+def test_swap_with_unknown_cargo_uses_the_cargo_note(tmp_path):
+    _type9_now(tmp_path, fuel=10.0, cargo=None)
+    result = _type9_fsd_swap()
+    assert result["state_note"] == CARGO_UNKNOWN
+    assert result["old_jump_range_now"] is None and result["fuel_now"] is None
+    assert result["summary"].endswith(f" Current-load jump range unavailable: {CARGO_UNKNOWN}.")
+
+
+def test_swap_with_stale_fuel_does_not_relay_the_stale_number(tmp_path):
+    _type9_now(tmp_path, fuel=99.0, cargo=100)  # tank is 64.0 t
+    result = _type9_fsd_swap()
+    assert result["fuel_now"] is None
+    assert result["state_note"] == "the tracked fuel level doesn't fit this ship's tank, so it's probably stale"
+    assert "99" not in result["summary"]
+
+
+def test_swap_empty_slot_reads_adding_not_swapping(tmp_path):
+    _type9_now(tmp_path, fuel=10.0, cargo=100)
+    result = qf.simulate_module_swap(
+        module_group="shield generator", module_class=4, module_rating="A", slot="Slot06_Size4",
+    )
+    assert result["found"] is True and result["removed"] == {"item": None}
+    assert result["old_unladen_mass"] == 1122.0
+    assert result["summary"] == (
+        "Type-9 Heavy: adding int_shieldgenerator_size4_class5 in Slot06_Size4: "
+        "jump range now 8.39 -> 8.32 ly (-0.07); max 9.16 -> 9.08 ly (-0.08); "
+        "unladen mass 1122.0 -> 1132.0 t (+10.00); power margin 2.71 MW."
+    )
+
+
+def test_swap_with_unknown_power_margin_drops_the_margin_clause(tmp_path):
+    path = _type9_now(tmp_path, fuel=10.0, cargo=100)
+    _insert_module(path, "Slot08_Size4", "int_notarealmodule_size4")  # On, but not in module_stats
+    result = qf.simulate_module_swap(module_group="life support", module_class=5, module_rating="D")
+    assert result["new_power_margin"] is None
+    assert result["power_unknown_modules"] == ["int_notarealmodule_size4"]
+    assert result["summary"] == (
+        "Type-9 Heavy: swapping int_lifesupport_size5_class1 for int_lifesupport_size5_class2 in LifeSupport: "
+        "jump range now 8.39 -> 8.47 ly (+0.08); max 9.16 -> 9.26 ly (+0.10); "
+        "unladen mass 1122.0 -> 1110.0 t (-12.00)."
+    )
+
+
+def test_swap_ranged_blueprint_reads_between_and_omits_the_change(tmp_path):
+    """Lightweight g1 on a life support: the module mass is a genuine roll
+    range, so the unladen mass and both jump ranges are {"min", "max"}."""
+    _type9_now(tmp_path, fuel=10.0, cargo=100)
+    result = qf.simulate_module_swap(
+        module_group="life support", module_class=5, module_rating="D",
+        blueprint_name="Lightweight", grade=1,
+    )
+    assert result["new_unladen_mass"] == {"min": 1106.4, "max": 1110.0}
+    assert result["mass_change"] == {"min": -15.6, "max": -12.0}
+    assert result["new_jump_range_max"] == {"min": 9.26, "max": 9.29}
+    assert result["jump_range_change_max"] == {"min": 0.1, "max": 0.13}
+    # now: unladen 1110.0 (heavier end) -> 8.47, unladen 1106.4 (lighter end) -> 8.49
+    assert result["new_jump_range_now"] == {"min": 8.47, "max": 8.49}
+    assert result["old_jump_range_now"] == 8.39
+    assert result["jump_range_change_now"] == {"min": 0.08, "max": 0.11}
+    # the old_* figures are always one plain number
+    assert isinstance(result["old_jump_range_now"], float)
+    assert isinstance(result["old_jump_range_max"], float)
+    assert isinstance(result["old_unladen_mass"], float)
+    assert result["summary"] == (
+        "Type-9 Heavy: swapping int_lifesupport_size5_class1 for int_lifesupport_size5_class2 in LifeSupport: "
+        "jump range now 8.39 -> between 8.47 and 8.49 ly; "
+        "max 9.16 -> between 9.26 and 9.29 ly; "
+        "unladen mass 1122.0 -> between 1106.4 and 1110.0 t; "
+        "power margin 5.72 MW."
+    )
+    assert "(" not in result["summary"]  # no change in parentheses next to a range
+
+
+def test_swap_ranged_power_margin_reads_between(tmp_path):
+    _type9_now(tmp_path, fuel=10.0, cargo=100)
+    result = qf.simulate_module_swap(
+        module_group="power plant", module_class=6, module_rating="A",
+        blueprint_name="Overcharged", grade=3, variant="int_powerplant_size6_class5",
+    )
+    assert result["new_power_margin"] == {"min": 18.98, "max": 20.74}
+    assert result["summary"] == (
+        "Type-9 Heavy: swapping int_powerplant_size6_class1 for int_powerplant_size6_class5 in PowerPlant: "
+        "jump range now 8.39 -> 8.52 ly (+0.14); max 9.16 -> 9.33 ly (+0.17); "
+        "unladen mass 1122.0 -> 1102.0 t (-20.00); power margin between 18.98 and 20.74 MW."
+    )
+
+
+def test_swap_current_range_counts_a_fitted_booster_for_old_and_new_alike(tmp_path):
+    path = _type9_now(tmp_path, fuel=10.0, cargo=100)
+    _insert_module(path, "Slot08_Size4", "int_guardianfsdbooster_size2")
+    # swapping something else: the booster stays, +6 ly on both figures
+    # (8.385687 + 6 -> 8.468170 + 6, computed through loadout_calc)
+    other = qf.simulate_module_swap(module_group="life support", module_class=5, module_rating="D")
+    assert other["old_jump_range_now"] == 14.39
+    assert other["new_jump_range_now"] == 14.47
+    assert other["jump_range_change_now"] == 0.08
+    assert other["new_jump_range_max"] == 15.26
+    # swapping the booster out: the removed booster adds nothing to the new
+    # figure (1120.7 t unladen, no bonus -> 8.394545), so the loss shows up
+    removed = qf.simulate_module_swap(
+        module_group="cargo rack", module_class=4, module_rating="E",
+        variant="int_cargorack_size4_class1", slot="Slot08_Size4",
+    )
+    assert removed["new_unladen_mass"] == 1120.7
+    assert removed["old_jump_range_now"] == 14.39
+    assert removed["new_jump_range_now"] == 8.39
+    assert removed["jump_range_change_now"] == -5.99
+    assert removed["new_jump_range_max"] == 9.18
+
+
+def test_swap_current_range_with_the_fitted_fsd_missing_optmass_is_unknown(tmp_path):
+    path = _type9_now(tmp_path)
+    conn = sqlite3.connect(path)
+    extra = json.loads(conn.execute("SELECT extra_json FROM module_stats WHERE symbol = 'int_hyperdrive_size6_class1'").fetchone()[0])
+    del extra["optmass"]
+    conn.execute("UPDATE module_stats SET extra_json = ? WHERE symbol = 'int_hyperdrive_size6_class1'", (json.dumps(extra),))
+    conn.commit()
+    conn.close()
+    result = qf.simulate_module_swap(module_group="life support", module_class=5, module_rating="D")
+    assert result["new_jump_range_max"] is None
+    assert result["jump_range_change_max"] is None
+    assert result["old_jump_range_now"] is None and result["new_jump_range_now"] is None
+    assert result["state_note"] == FSD_UNKNOWN
+    assert result["summary"] == (
+        "Type-9 Heavy: swapping int_lifesupport_size5_class1 for int_lifesupport_size5_class2 in LifeSupport: "
+        "unladen mass 1122.0 -> 1110.0 t (-12.00); power margin 5.72 MW. "
+        f"Current-load jump range unavailable: {FSD_UNKNOWN}."
+    )
+
+
+def test_incompatible_and_not_found_results_have_no_summary(tmp_path):
+    _type9_now(tmp_path)
+    too_big = qf.simulate_module_swap(module_group="life support", module_class=8, module_rating="E")
+    assert too_big["compatible"] is False and "summary" not in too_big
+    nothing = qf.simulate_module_swap(module_group="frame shift drive", module_class=9, module_rating="A")
+    assert nothing["found"] is False and "summary" not in nothing
+
+
+def _numbers_in(value):
+    """Every int/float anywhere inside a result (rounded to 2 dp)."""
+    if isinstance(value, bool) or value is None:
+        return set()
+    if isinstance(value, (int, float)):
+        return {round(float(value), 2)}
+    if isinstance(value, dict):
+        return set().union(*[_numbers_in(v) for v in value.values()]) if value else set()
+    if isinstance(value, (list, tuple)):
+        return set().union(*[_numbers_in(v) for v in value]) if value else set()
+    return set()
+
+
+def _summary_numbers(result):
+    """The standalone numbers in result["summary"] -- names that merely
+    contain digits (Type-9 Heavy, Slot06_Size4, int_hyperdrive_size6_class5)
+    are blanked out first."""
+    text = result["summary"]
+    for name in (result["ship_name"], result["removed"]["item"], result["added"]["symbol"], result["slot"], result["state_note"]):
+        if name:
+            text = text.replace(name, " ")
+    return [float(m) for m in re.findall(r"(?<![\w.])[+-]?\d+(?:\.\d+)?", text)]
+
+
+@pytest.mark.parametrize("scenario", ["fsd_swap", "empty_slot", "ranged_unladen", "ranged_margin", "unknown_fuel", "stale_fuel"])
+def test_every_number_in_the_summary_is_in_the_structured_result(tmp_path, scenario):
+    fuel, cargo = {"unknown_fuel": (None, None), "stale_fuel": (99.0, 100)}.get(scenario, (10.0, 100))
+    _type9_now(tmp_path, fuel=fuel, cargo=cargo)
+    calls = {
+        "fsd_swap": dict(module_group="frame shift drive", module_class=6, module_rating="A", variant="int_hyperdrive_size6_class5"),
+        "empty_slot": dict(module_group="shield generator", module_class=4, module_rating="A", slot="Slot06_Size4"),
+        "ranged_unladen": dict(module_group="life support", module_class=5, module_rating="D", blueprint_name="Lightweight", grade=1),
+        "ranged_margin": dict(module_group="power plant", module_class=6, module_rating="A", blueprint_name="Overcharged", grade=3, variant="int_powerplant_size6_class5"),
+        "unknown_fuel": dict(module_group="frame shift drive", module_class=6, module_rating="A", variant="int_hyperdrive_size6_class5"),
+        "stale_fuel": dict(module_group="frame shift drive", module_class=6, module_rating="A", variant="int_hyperdrive_size6_class5"),
+    }
+    result = qf.simulate_module_swap(**calls[scenario])
+    assert result["found"] is True and result["compatible"] is True
+    in_summary = _summary_numbers(result)
+    assert in_summary, "the summary should contain numbers"
+    in_result = _numbers_in({k: v for k, v in result.items() if k != "summary"})
+    missing = [n for n in in_summary if round(n, 2) not in in_result]
+    assert missing == [], f"summary numbers not in the result: {missing}\n{result['summary']}"
