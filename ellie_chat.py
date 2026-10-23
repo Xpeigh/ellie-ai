@@ -33,6 +33,8 @@ RULES:
 - If a tool result has a non-empty "unmodeled_blueprint_effects" list, mention plainly that those specific effects aren't reflected in the numbers -- don't just report the numbers as if they were the whole picture.
 - If a tool result has a "variants" list, the request matched several different real modules -- list them for the commander and ask which one they mean (then call the tool again with `variant`); don't say the data is missing, and don't pick one yourself.
 - If a tool result has a "caveat", tell the commander it along with the numbers -- never drop it.
+- If a tool result has a "summary", base your answer on it: you may rephrase, but keep every number and unit exactly as written.
+- When asked for the "jump range" without more detail, give jump_range_now (the range with the current fuel and cargo); mention jump_range_max only as the empty-ship maximum, never as the current range.
 - Once you have enough information to call a tool, call it immediately. Don't ask the commander to confirm an obvious detail (like a system name they already gave you) before proceeding.
 - Keep answers short and conversational, like a ship's computer, not a report.
 """
@@ -133,7 +135,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "get_current_loadout",
-            "description": "Get the commander's current ship, its real mass and jump range as reported by the game, and every fitted module including real engineering modifiers.",
+            "description": "Get the commander's current ship: its jump range right now (with the fuel and cargo on board), its empty-ship maximum jump range, mass, and every fitted module including real engineering modifiers.",
             "parameters": {"type": "object", "properties": {}},
         },
     },
@@ -153,7 +155,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "simulate_module_swap",
-            "description": "'What if I fit a different module' -- swaps one module in the commander's CURRENT ship for a hypothetical one and reports the real resulting mass, max jump range (unladen, one jump's fuel), and power changes, or whether it's compatible at all.",
+            "description": "'What if I fit a different module' -- swaps one module in the commander's CURRENT ship for a hypothetical one and reports the real resulting mass, jump range now (current fuel and cargo) and empty-ship maximum jump range, and power changes, or whether it's compatible at all.",
             "parameters": {
                 "type": "object",
                 "properties": {
