@@ -1072,7 +1072,7 @@ def test_swap_carries_the_jump_check_warning_and_appends_it_to_the_summary(tmp_p
     assert result["old_jump_range_now"] == 8.39  # numbers still given; the warning qualifies them
 
 
-def test_swap_warning_goes_after_the_unavailable_note_never_with_it(tmp_path):
+def test_swap_has_no_warning_when_there_is_no_current_range(tmp_path):
     """No current range -> no warning (it would qualify nothing)."""
     path = _type9_now(tmp_path, fuel=None, cargo=None)
     _set_ship_state(path, **_consistent_last_jump(cargo=400))
@@ -1147,3 +1147,109 @@ def test_swap_with_unknown_max_jump_range_leaves_the_max_clause_out(tmp_path):
         "unladen mass 1122.0 -> 1110.0 t (-12.00); power margin 5.72 MW."
     )
     assert "None" not in result["summary"]
+
+
+# ---------------------------------------------------------------------------
+# Fix round 2
+# ---------------------------------------------------------------------------
+
+OLD_SHIP_STATE_DDL = """
+    CREATE TABLE ship_state (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        fuel_main REAL, cargo_count INTEGER, fuel_updated TEXT, cargo_updated TEXT,
+        last_jump_dist REAL, last_jump_fuel_used REAL, last_jump_fuel_before REAL,
+        last_jump_cargo INTEGER, last_jump_unladen REAL, last_jump_fsd_item TEXT,
+        last_jump_boosted INTEGER, last_jump_time TEXT
+    )
+"""
+MALFORMED_MODIFIERS = ["{not json", "null", "{}", "[1, 2]", ""]
+
+
+def _fsd_swap_6a():
+    return qf.simulate_module_swap(
+        module_group="frame shift drive", module_class=6, module_rating="A",
+        variant="int_hyperdrive_size6_class5",
+    )
+
+
+def test_swaps_on_a_ship_state_table_the_watcher_has_not_migrated_yet_do_not_raise(tmp_path):
+    """No last_jump_fsd_optmass column yet: the jump check stays quiet (even for
+    a snapshot that looks 300 t off) and the range figures still work."""
+    path = _type9_db(tmp_path)
+    conn = sqlite3.connect(path)
+    conn.execute("DROP TABLE ship_state")
+    conn.execute(OLD_SHIP_STATE_DDL)
+    conn.execute("INSERT INTO ship_state (id, fuel_main, cargo_count) VALUES (1, 10.0, 100)")
+    for column, value in _consistent_last_jump(cargo=400).items():
+        conn.execute(f"UPDATE ship_state SET {column} = ? WHERE id = 1", (value,))
+    conn.commit()
+    conn.close()
+
+    life_support = _ls_swap()
+    assert "warning" not in life_support
+    assert life_support["summary"] == LS_SWAP_SUMMARY
+
+    fsd = _fsd_swap_6a()
+    assert "warning" not in fsd
+    assert fsd["old_jump_range_now"] == 8.39 and fsd["new_jump_range_now"] == 17.81
+    assert "may be inaccurate" not in fsd["summary"]
+
+
+@pytest.mark.parametrize("with_blueprint", [False, True])
+@pytest.mark.parametrize("bad", MALFORMED_MODIFIERS)
+def test_swaps_with_malformed_engineering_modifiers_on_the_drive_read_as_no_engineering(tmp_path, bad, with_blueprint):
+    path = _type9_now(tmp_path, fuel=10.0, cargo=100)
+    conn = sqlite3.connect(path)
+    if with_blueprint:
+        conn.execute(
+            "UPDATE current_loadout_modules SET engineering_blueprint = 'FSD_LongRange', engineering_level = 5, "
+            "engineering_modifiers_json = ? WHERE slot = 'FrameShiftDrive'", (bad,))
+    else:
+        conn.execute("UPDATE current_loadout_modules SET engineering_modifiers_json = ? WHERE slot = 'FrameShiftDrive'", (bad,))
+    conn.commit()
+    conn.close()
+
+    fsd = _fsd_swap_6a()
+    assert fsd["mass_change"] == 0.0               # the removed drive weighed its stock 40 t
+    assert fsd["old_jump_range_now"] == 8.39 and fsd["new_jump_range_now"] == 17.81
+    life_support = _ls_swap()
+    assert life_support["old_jump_range_now"] == 8.39
+    assert life_support["summary"] == LS_SWAP_SUMMARY
+
+
+def test_swaps_with_no_base_optimal_mass_and_no_jump_time_one_have_no_warning_and_do_not_raise(tmp_path):
+    path = _type9_now(tmp_path, fuel=10.0, cargo=100)
+    _set_ship_state(path, **_consistent_last_jump(cargo=400))   # would warn, were it judged
+    conn = sqlite3.connect(path)
+    extra = json.loads(conn.execute("SELECT extra_json FROM module_stats WHERE symbol = ?", (TYPE9_FSD_ITEM,)).fetchone()[0])
+    del extra["optmass"]
+    conn.execute("UPDATE module_stats SET extra_json = ? WHERE symbol = ?", (json.dumps(extra), TYPE9_FSD_ITEM))
+    event = json.load(open(FIXTURES / "type9_loadout_2026-01-04.json"))
+    for module in event["Modules"]:
+        if module["Slot"] == "FrameShiftDrive":
+            module["Engineering"] = {"BlueprintName": "FSD_LongRange", "Level": 5, "Quality": 0.6, "Modifiers": [
+                {"Label": "FSDOptimalMass", "Value": 1488.0, "OriginalValue": 960.0, "LessIsGood": 0}]}
+    jw.process_event(conn, event)
+    conn.close()
+
+    for result in (_ls_swap(), _fsd_swap_6a()):
+        assert result["old_jump_range_now"] == 13.0
+        assert "warning" not in result
+        assert "may be inaccurate" not in result["summary"]
+
+
+def test_swap_summary_has_no_stray_colon_when_every_clause_is_unknown(tmp_path):
+    """Unknown empty mass drops the jump and unladen clauses and an On module
+    missing from module_stats drops the power margin: nothing is left to list."""
+    path = _type9_now(tmp_path, fuel=10.0, cargo=100)
+    _insert_module(path, "Slot08_Size4", "int_notarealmodule_size4")
+    conn = sqlite3.connect(path)
+    conn.execute("UPDATE current_loadout SET unladen_mass = NULL WHERE id = 1")
+    conn.commit()
+    conn.close()
+    result = _ls_swap()
+    assert result["new_power_margin"] is None and result["new_unladen_mass"] is None
+    assert result["summary"] == (
+        "Type-9 Heavy: swapping int_lifesupport_size5_class1 for int_lifesupport_size5_class2 in LifeSupport. "
+        f"Current-load jump range unavailable: {NO_EMPTY_MASS}."
+    )

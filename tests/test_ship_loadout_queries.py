@@ -563,3 +563,101 @@ def test_unknown_max_jump_range_with_an_unusable_state(tmp_path):
     result = qf.get_current_loadout()
     assert result["summary"] == f"Type-9 Heavy: Current-load jump range unavailable: {FUEL_UNKNOWN}."
     assert "None" not in result["summary"]
+
+
+# --- fix round 2 --------------------------------------------------------------
+
+# ship_state as the 6fe3013 watcher created it, before last_jump_fsd_optmass
+OLD_SHIP_STATE_DDL = """
+    CREATE TABLE ship_state (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        fuel_main REAL, cargo_count INTEGER, fuel_updated TEXT, cargo_updated TEXT,
+        last_jump_dist REAL, last_jump_fuel_used REAL, last_jump_fuel_before REAL,
+        last_jump_cargo INTEGER, last_jump_unladen REAL, last_jump_fsd_item TEXT,
+        last_jump_boosted INTEGER, last_jump_time TEXT
+    )
+"""
+
+
+def _use_the_old_ship_state_table(path, fuel=10.0, cargo=100, last_jump=None):
+    conn = sqlite3.connect(path)
+    conn.execute("DROP TABLE ship_state")
+    conn.execute(OLD_SHIP_STATE_DDL)
+    conn.execute("INSERT INTO ship_state (id, fuel_main, cargo_count) VALUES (1, ?, ?)", (fuel, cargo))
+    for column, value in (last_jump or {}).items():
+        conn.execute(f"UPDATE ship_state SET {column} = ? WHERE id = 1", (value,))
+    conn.commit()
+    conn.close()
+
+
+def test_a_ship_state_table_the_watcher_has_not_migrated_yet_still_gives_the_range_and_no_warning(tmp_path):
+    """The watcher hasn't been restarted since the upgrade: the table has no
+    last_jump_fsd_optmass. The jump check can't judge that snapshot (even one
+    that looks 300 t off), so it stays quiet, and nothing raises."""
+    path = _type9_db(tmp_path)
+    _use_the_old_ship_state_table(path, last_jump=_consistent_last_jump(cargo=400))
+    result = qf.get_current_loadout()
+    assert result["jump_range_now"] == 8.39
+    assert "warning" not in result
+    assert result["summary"] == (
+        "Type-9 Heavy: jump range now 8.39 ly (fuel 10.0 t, cargo 100 t, mass 1232.0 t); "
+        "max 9.16 ly with an empty hold and one jump of fuel."
+    )
+
+
+# W3: malformed engineering_modifiers_json on the fitted FSD must never raise.
+
+MALFORMED_MODIFIERS = ["{not json", "null", "{}", "[1, 2]", ""]
+
+
+def _malform_the_fsd_engineering(path, bad, with_blueprint):
+    conn = sqlite3.connect(path)
+    if with_blueprint:
+        conn.execute(
+            "UPDATE current_loadout_modules SET engineering_blueprint = 'FSD_LongRange', engineering_level = 5, "
+            "engineering_modifiers_json = ? WHERE slot = 'FrameShiftDrive'", (bad,))
+    else:
+        conn.execute("UPDATE current_loadout_modules SET engineering_modifiers_json = ? WHERE slot = 'FrameShiftDrive'", (bad,))
+    conn.commit()
+    conn.close()
+
+
+@pytest.mark.parametrize("with_blueprint", [False, True])
+@pytest.mark.parametrize("bad", MALFORMED_MODIFIERS)
+def test_malformed_engineering_modifiers_on_the_drive_read_as_no_engineering(tmp_path, bad, with_blueprint):
+    path = _type9_now(tmp_path, fuel=10.0, cargo=100)
+    _malform_the_fsd_engineering(path, bad, with_blueprint)
+    result = qf.get_current_loadout()
+    assert result["jump_range_now"] == 8.39      # the stock drive's 960, as if never engineered
+    assert result["state_note"] is None
+    fsd = next(m for m in result["modules"] if m["slot"] == "FrameShiftDrive")
+    if with_blueprint:
+        assert fsd["engineering"]["modifiers"] == []
+    else:
+        assert "engineering" not in fsd
+
+
+def test_a_non_numeric_optimal_mass_value_reads_as_no_engineering(tmp_path):
+    path = _type9_now(tmp_path, fuel=10.0, cargo=100)
+    _malform_the_fsd_engineering(path, '[{"Label": "FSDOptimalMass", "Value": "abc"}]', with_blueprint=True)
+    assert qf.get_current_loadout()["jump_range_now"] == 8.39
+
+
+def test_no_base_optimal_mass_and_no_jump_time_one_means_no_warning_not_a_crash(tmp_path):
+    """The fitted drive's module_stats row has no optmass, the drive is
+    engineered now (so the range can still be computed), and the last-jump
+    snapshot was taken before the engineering (NULL snapshot optmass): there is
+    no optimal mass to judge that jump by."""
+    path = _type9_now(tmp_path, fuel=10.0, cargo=100)
+    _set_ship_state(path, **_consistent_last_jump(cargo=400))   # would warn, were it judged
+    conn = sqlite3.connect(path)
+    extra = json.loads(conn.execute("SELECT extra_json FROM module_stats WHERE symbol = ?", (TYPE9_FSD_ITEM,)).fetchone()[0])
+    del extra["optmass"]
+    conn.execute("UPDATE module_stats SET extra_json = ? WHERE symbol = ?", (json.dumps(extra), TYPE9_FSD_ITEM))
+    conn.commit()
+    conn.close()
+    _process(path, _type9_event(1488.0))
+    result = qf.get_current_loadout()
+    assert result["jump_range_now"] == 13.0       # computed with the engineered 1488
+    assert "warning" not in result
+    assert "may be inaccurate" not in result["summary"]

@@ -589,6 +589,10 @@ def _jump_check_warning(conn, params):
     state = _read_ship_state(conn)
     if state is None or not _fsd_params_complete(params):
         return None
+    if "last_jump_fsd_optmass" not in state.keys():
+        # the watcher hasn't migrated the table since the upgrade: a snapshot
+        # without its jump-time optimal mass can't be judged
+        return None
     jump_optmass = state["last_jump_fsd_optmass"]
     if jump_optmass is None:
         jump_optmass = params["base_optmass"]
@@ -653,7 +657,7 @@ def get_current_loadout() -> dict:
                 "level": m["engineering_level"],
                 "quality": m["engineering_quality"],
                 "experimental_effect": m["engineering_experimental"],
-                "modifiers": json.loads(m["engineering_modifiers_json"]) if m["engineering_modifiers_json"] else [],
+                "modifiers": _modifier_list(m["engineering_modifiers_json"]),
             }
         module_list.append(entry)
 
@@ -1030,14 +1034,30 @@ def _coerce_int_in_range(value, lo, hi, label):
     return n, None
 
 
+def _modifier_list(modifiers_json):
+    """A stored Engineering.Modifiers JSON as a list of dicts. The text comes
+    from external data ('null' when a journal's Modifiers is null, in
+    principle anything); whatever isn't a list of dicts is treated as having no
+    modifiers, so one bad row can't take a tool down."""
+    try:
+        modifiers = json.loads(modifiers_json) if modifiers_json else []
+    except (ValueError, TypeError):
+        return []
+    if not isinstance(modifiers, list) or not all(isinstance(m, dict) for m in modifiers):
+        return []
+    return modifiers
+
+
 def _engineered_modifier(modifiers_json, label):
     """One journal Engineering.Modifiers entry's real Value by Label, or
-    None if there's no Engineering block or no modifier with that label."""
-    if not modifiers_json:
-        return None
-    for mod in json.loads(modifiers_json):
+    None if there's no Engineering block, no modifier with that label, or the
+    Value isn't a number (every modifier read here feeds arithmetic)."""
+    for mod in _modifier_list(modifiers_json):
         if mod.get("Label") == label:
-            return mod.get("Value")
+            value = mod.get("Value")
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                return value
+            return None
     return None
 
 
@@ -1204,7 +1224,8 @@ def _swap_summary(result):
     if result["new_power_margin"] is not None:
         clauses.append(f"power margin {text(result['new_power_margin'])} MW")
 
-    summary = f"{result['ship_name']}: {action} in {result['slot']}: " + "; ".join(clauses) + "."
+    summary = f"{result['ship_name']}: {action} in {result['slot']}"
+    summary += (": " + "; ".join(clauses) + ".") if clauses else "."
     if result["state_note"]:
         summary += f" Current-load jump range unavailable: {result['state_note']}."
     if result.get("warning"):
