@@ -52,6 +52,14 @@ def find_latest_journal(journal_dir=JOURNAL_DIR):
     return max(files, key=lambda f: f.stat().st_mtime)
 
 
+# the last-jump snapshot columns of ship_state (all describe one jump)
+LAST_JUMP_COLUMNS = (
+    "last_jump_dist", "last_jump_fuel_used", "last_jump_fuel_before", "last_jump_cargo",
+    "last_jump_unladen", "last_jump_fsd_item", "last_jump_fsd_optmass", "last_jump_boosted",
+    "last_jump_time",
+)
+
+
 def build_schema(conn):
     conn.executescript(
         """
@@ -115,10 +123,17 @@ def build_schema(conn):
     for col in ("current_x", "current_y", "current_z"):
         if col not in existing:
             conn.execute(f"ALTER TABLE commander_status ADD COLUMN {col} REAL")
-    # same for ship_state: the jump-time optimal mass was added after the table
+    # same for ship_state: the jump-time optimal mass was added after the table.
+    # A snapshot written before the column existed has no jump-time optimal
+    # mass, which would now read as "drive was not engineered" and let the jump
+    # check judge the jump by the wrong mass -- so that snapshot is dropped. The
+    # fuel and cargo (and their stamps) are still valid and are kept.
     existing = {row[1] for row in conn.execute("PRAGMA table_info(ship_state)")}
     if "last_jump_fsd_optmass" not in existing:
         conn.execute("ALTER TABLE ship_state ADD COLUMN last_jump_fsd_optmass REAL")
+        conn.execute(
+            "UPDATE ship_state SET " + ", ".join(f"{c} = NULL" for c in LAST_JUMP_COLUMNS) + " WHERE id = 1"
+        )
     conn.commit()
 
 
@@ -157,13 +172,6 @@ def set_ship_state(conn, **fields):
     conn.commit()
 
 
-LAST_JUMP_COLUMNS = (
-    "last_jump_dist", "last_jump_fuel_used", "last_jump_fuel_before", "last_jump_cargo",
-    "last_jump_unladen", "last_jump_fsd_item", "last_jump_fsd_optmass", "last_jump_boosted",
-    "last_jump_time",
-)
-
-
 def forget_ship_fuel_and_cargo(conn):
     """A different ship (a swap or a purchase) or a respawn means the tracked
     fuel and cargo no longer describe the ship we're in, and neither does the
@@ -190,6 +198,25 @@ def add_refuelled_fuel(conn, amount):
     set_ship_state(conn, fuel_main=fuel)
 
 
+def _fsd_optimal_mass(modifiers_json):
+    """The FSDOptimalMass Value in a stored Engineering.Modifiers JSON, or None.
+    The text comes from external data ('null' when a journal's Modifiers is
+    null, in principle anything), and a watcher that runs all day must not die
+    on one bad row: anything that isn't a list of dicts with a numeric Value
+    just means "no such modifier"."""
+    try:
+        modifiers = json.loads(modifiers_json) if modifiers_json else None
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(modifiers, list) or not all(isinstance(m, dict) for m in modifiers):
+        return None
+    for modifier in modifiers:
+        value = modifier.get("Value")
+        if modifier.get("Label") == "FSDOptimalMass" and isinstance(value, (int, float)) and not isinstance(value, bool):
+            return value
+    return None
+
+
 def record_fsd_jump(conn, event):
     """Snapshot what the game says this jump cost, alongside the ship as it
     was BEFORE the jump (cargo, unladen mass, fitted FSD, fuel), so
@@ -211,11 +238,7 @@ def record_fsd_jump(conn, event):
         # The drive's optimal mass AT the jump: engineering changes it without
         # changing the item symbol, so the item alone can't say which mass the
         # game burned fuel against. NULL = not engineered (base value applies).
-        jump_optmass = None
-        if fsd and fsd[1]:
-            for modifier in json.loads(fsd[1]):
-                if modifier.get("Label") == "FSDOptimalMass":
-                    jump_optmass = modifier.get("Value")
+        jump_optmass = _fsd_optimal_mass(fsd[1]) if fsd else None
         fields.update(
             last_jump_dist=dist, last_jump_fuel_used=used, last_jump_fuel_before=level + used,
             last_jump_cargo=cargo, last_jump_unladen=unladen,
@@ -322,7 +345,15 @@ def process_event(conn, event):
         )
         # The Cargo event follows at launch, so the hold is unknown until then.
         fields = {"cargo_count": None}
-        if event.get("FuelLevel") is not None:
+        ship = (event.get("Ship") or "").lower()
+        if "suit" in ship or ship == "testbuggy":
+            # Logging in on foot (ExplorationSuit_Class1, FlightSuit, ...) or in
+            # an SRV (TestBuggy) reports the SUIT's or the buggy's fuel, not the
+            # ship's. Boarding the ship writes a Loadout but no fuel event, so
+            # storing it would hand a 320 t Cutter the suit's 1.0 t: unknown
+            # until the first real fuel event.
+            fields["fuel_main"] = None
+        elif event.get("FuelLevel") is not None:
             fields["fuel_main"] = event["FuelLevel"]
         set_ship_state(conn, **fields)
     elif etype == "ShipyardSwap":
