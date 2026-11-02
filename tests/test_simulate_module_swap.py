@@ -861,7 +861,9 @@ def test_swap_empty_slot_reads_adding_not_swapping(tmp_path):
     )
     assert result["found"] is True and result["removed"] == {"item": None}
     assert result["old_unladen_mass"] == 1122.0
-    assert result["summary"] == (
+    # (Task 10a X8: the summary now also ends with the empty-slot caveat, pinned in
+    # test_summary_ends_with_the_caveat_for_an_unfitted_internal_slot)
+    assert result["summary"].startswith(
         "Type-9 Heavy: adding int_shieldgenerator_size4_class5 in Slot06_Size4: "
         "jump range now 8.39 -> 8.32 ly (-0.07); max 9.16 -> 9.08 ly (-0.08); "
         "unladen mass 1122.0 -> 1132.0 t (+10.00); power margin 2.71 MW."
@@ -906,7 +908,8 @@ def test_swap_ranged_blueprint_reads_between_and_omits_the_change(tmp_path):
         "jump range now 8.39 -> between 8.47 and 8.49 ly; "
         "max 9.16 -> between 9.26 and 9.29 ly; "
         "unladen mass 1122.0 -> between 1106.4 and 1110.0 t; "
-        "power margin 5.72 MW."
+        "power margin 5.72 MW. "
+        "Blueprint: Lightweight grade 1. Not reflected in these numbers: integrity."
     )
     assert "(" not in result["summary"]  # no change in parentheses next to a range
 
@@ -921,7 +924,8 @@ def test_swap_ranged_power_margin_reads_between(tmp_path):
     assert result["summary"] == (
         "Type-9 Heavy: swapping int_powerplant_size6_class1 for int_powerplant_size6_class5 in PowerPlant: "
         "jump range now 8.39 -> 8.52 ly (+0.14); max 9.16 -> 9.33 ly (+0.17); "
-        "unladen mass 1122.0 -> 1102.0 t (-20.00); power margin between 18.98 and 20.74 MW."
+        "unladen mass 1122.0 -> 1102.0 t (-20.00); power margin between 18.98 and 20.74 MW. "
+        "Blueprint: Overcharged grade 3. Not reflected in these numbers: eff, integrity."
     )
 
 
@@ -1253,3 +1257,356 @@ def test_swap_summary_has_no_stray_colon_when_every_clause_is_unknown(tmp_path):
         "Type-9 Heavy: swapping int_lifesupport_size5_class1 for int_lifesupport_size5_class2 in LifeSupport. "
         f"Current-load jump range unavailable: {NO_EMPTY_MASS}."
     )
+
+
+# ---------------------------------------------------------------------------
+# Task 10a, piece 1: swap-engine fixes (X1 capacities, X2 booster, X3 blueprint
+# names, X6 slot spellings, X8 summary qualifiers)
+# ---------------------------------------------------------------------------
+
+TYPE9_P = (960, 5.3, 0.011, 2.6)   # the Type-9's stock drive: optmass, maxfuel, fuelmul, fuelpower
+
+
+def _set_cargo_capacity(path, capacity, slot_modifiers=None):
+    """Make current_loadout.cargo_capacity (and optionally one rack's journal
+    modifiers) say what a real Loadout would."""
+    conn = sqlite3.connect(path)
+    conn.execute("UPDATE current_loadout SET cargo_capacity = ? WHERE id = 1", (capacity,))
+    for slot, modifiers in (slot_modifiers or {}).items():
+        conn.execute(
+            "UPDATE current_loadout_modules SET engineering_modifiers_json = ? WHERE slot = ?",
+            (json.dumps(modifiers), slot))
+    conn.commit()
+    conn.close()
+
+
+# --- X1: a swap caps fuel and cargo at the NEW capacities --------------------
+
+def test_swapping_to_a_smaller_tank_caps_the_fuel_in_the_new_range(tmp_path):
+    """64 t standard tank -> 8 t tank (fuel tank class 3): the ship can't hold
+    the 10 t it has now, so the new range assumes 8 t. old_* and the reported
+    fuel/cargo stay the real current values."""
+    _type9_now(tmp_path, fuel=10.0, cargo=100)
+    result = qf.simulate_module_swap(module_group="fuel tank", module_class=3, module_rating="C")
+    new_now = compute_current_jump_range(1122.0, 8.0, 100, *TYPE9_P)       # 8.3993, not the uncapped 8.3857
+    assert result["new_jump_range_now"] == round(new_now, 2) == 8.4
+    assert result["old_jump_range_now"] == 8.39
+    assert result["jump_range_change_now"] == 0.01
+    assert result["fuel_now"] == 10.0 and result["cargo_now"] == 100
+    assert result["capacity_note"] == "the new tank holds only 8.0 t, so the new range assumes 8.0 t of fuel instead of 10.0 t"
+    assert result["summary"] == (
+        "Type-9 Heavy: swapping int_fueltank_size6_class3 for int_fueltank_size3_class3 in FuelTank: "
+        "jump range now 8.39 -> 8.4 ly (+0.01); max 9.16 -> 9.16 ly (+0.00); "
+        "unladen mass 1122.0 -> 1122.0 t (+0.00); power margin 5.79 MW. "
+        "Note: the new tank holds only 8.0 t, so the new range assumes 8.0 t of fuel instead of 10.0 t."
+    )
+
+
+def test_a_tank_that_holds_what_is_aboard_has_no_capacity_note(tmp_path):
+    _type9_now(tmp_path, fuel=10.0, cargo=100)
+    result = qf.simulate_module_swap(module_group="fuel tank", module_class=4, module_rating="C")   # 16 t
+    assert "capacity_note" not in result
+    assert result["new_jump_range_now"] == 8.39
+    assert "Note:" not in result["summary"]
+
+
+def test_a_tank_exactly_as_big_as_the_fuel_aboard_is_not_a_cap(tmp_path):
+    _type9_now(tmp_path, fuel=8.0, cargo=100)
+    result = qf.simulate_module_swap(module_group="fuel tank", module_class=3, module_rating="C")   # 8 t
+    assert "capacity_note" not in result
+
+
+def test_removing_a_loaded_cargo_rack_caps_the_cargo_in_the_new_range(tmp_path):
+    """348 t of racks (128+128+64+16+8+4); 340 t aboard; the 128 t rack in
+    Slot00_Size8 becomes an 8 t one -> 348 - 128 + 8 = 228 t of hold."""
+    _type9_now(tmp_path, fuel=10.0, cargo=340)
+    result = qf.simulate_module_swap(
+        module_group="cargo rack", module_class=3, module_rating="E",
+        variant="int_cargorack_size3_class1", slot="Slot00_Size8",
+    )
+    assert result["old_jump_range_now"] == round(compute_current_jump_range(1122.0, 10.0, 340, *TYPE9_P), 2) == 7.02
+    assert result["new_jump_range_now"] == round(compute_current_jump_range(1122.0, 10.0, 228.0, *TYPE9_P), 2) == 7.6
+    assert result["cargo_now"] == 340
+    assert result["capacity_note"] == "the new hold carries only 228.0 t, so the new range assumes 228.0 t of cargo instead of 340 t"
+    assert result["summary"].endswith(
+        " Note: the new hold carries only 228.0 t, so the new range assumes 228.0 t of cargo instead of 340 t.")
+
+
+def test_an_engineered_racks_journal_capacity_is_what_gets_subtracted(tmp_path):
+    """The rack in Slot00_Size8 is engineered to hold 200 t (base 128), so the
+    Loadout's CargoCapacity is 420. Removing it leaves 420 - 200 + 8 = 228 t,
+    and 300 t aboard no longer fit. Subtracting the base 128 would leave 300 and
+    miss the cap."""
+    path = _type9_now(tmp_path, fuel=10.0, cargo=300)
+    _set_cargo_capacity(path, 420.0, {"Slot00_Size8": [{"Label": "CargoCapacity", "Value": 200.0}]})
+    result = qf.simulate_module_swap(
+        module_group="cargo rack", module_class=3, module_rating="E",
+        variant="int_cargorack_size3_class1", slot="Slot00_Size8",
+    )
+    assert result["capacity_note"] == "the new hold carries only 228.0 t, so the new range assumes 228.0 t of cargo instead of 300 t"
+    assert result["new_jump_range_now"] == round(compute_current_jump_range(1122.0, 10.0, 228.0, *TYPE9_P), 2)
+
+
+def test_adding_a_rack_never_caps_and_a_hypothetical_rack_uses_its_base_capacity(tmp_path):
+    _type9_now(tmp_path, fuel=10.0, cargo=340)
+    result = qf.simulate_module_swap(
+        module_group="cargo rack", module_class=3, module_rating="E",
+        variant="int_cargorack_size3_class1", slot="Slot06_Size4",     # empty: 348 + 8 = 356 t
+    )
+    assert "capacity_note" not in result
+    assert result["new_jump_range_now"] == result["old_jump_range_now"]
+
+
+def test_a_swap_that_touches_neither_tank_nor_rack_has_no_capacity_note(tmp_path):
+    _type9_now(tmp_path, fuel=10.0, cargo=340)
+    result = _ls_swap()
+    assert "capacity_note" not in result
+
+
+def test_no_current_range_means_nothing_to_cap(tmp_path):
+    _type9_now(tmp_path, fuel=None, cargo=None)
+    result = qf.simulate_module_swap(module_group="fuel tank", module_class=3, module_rating="C")
+    assert result["new_jump_range_now"] is None
+    assert "capacity_note" not in result
+
+
+def test_both_caps_read_as_one_note_joined_with_a_semicolon():
+    """A single swap can't shrink a tank and a rack at once, so the note
+    builder is checked directly."""
+    assert qf._capacity_note(10.0, 8.0, 340, 228.0) == (
+        "the new tank holds only 8.0 t, so the new range assumes 8.0 t of fuel instead of 10.0 t; "
+        "the new hold carries only 228.0 t, so the new range assumes 228.0 t of cargo instead of 340 t"
+    )
+    assert qf._capacity_note(10.0, 16.0, 340, 348.0) is None
+    assert qf._capacity_note(10.0, None, 340, None) is None
+    assert qf._capacity_note(10.0, -3.0, 0, 0.0) == (
+        "the new tank holds only 0.0 t, so the new range assumes 0.0 t of fuel instead of 10.0 t")
+
+
+# --- X2: no false mass-model warning on a ship with a Guardian booster -------
+
+def test_a_fitted_guardian_booster_silences_the_jump_check_in_both_tools(tmp_path):
+    """The check infers the ship's mass from the jump distance with no booster
+    term, but the range model adds the booster's jumpboost; how the booster
+    changes JumpDist is unverified, so the check stays out of it."""
+    path = _type9_now(tmp_path, fuel=10.0, cargo=100)
+    _set_ship_state(path, **_consistent_last_jump(cargo=400))
+    assert qf.get_current_loadout()["warning"] == OFF_BY_300     # control: no booster -> warns
+    assert _ls_swap()["warning"] == OFF_BY_300
+
+    _insert_module(path, "Slot08_Size4", "int_guardianfsdbooster_size2")
+    loadout = qf.get_current_loadout()
+    swap = _ls_swap()
+    assert "warning" not in loadout and "may be inaccurate" not in loadout["summary"]
+    assert "warning" not in swap and "may be inaccurate" not in swap["summary"]
+    assert loadout["jump_range_now"] == 14.39        # the booster's +6 is still in the range
+
+
+# --- X3: blueprint names ------------------------------------------------------
+
+FSD_BLUEPRINTS = "Faster boot sequence, Increased range, Shielded"
+PD_BLUEPRINTS = "Charge enhanced, Engine focused, High charge capacity, Shielded, System focused, Weapon focused"
+
+
+def _fsd_blueprint_swap(name, grade=1):
+    return qf.simulate_module_swap(
+        module_group="frame shift drive", module_class=7, module_rating="E",
+        blueprint_name=name, grade=grade, variant="int_hyperdrive_size7_class1",
+    )
+
+
+@pytest.mark.parametrize("spelling", [
+    "FSD_LongRange", "fsd_longrange", "LongRange", "  Increased  range ", "increased-range",
+    "INCREASED RANGE", "Increased_range", "increasedrange",
+])
+def test_blueprint_spellings_resolve_to_the_same_blueprint(tmp_path, spelling):
+    _db(tmp_path)
+    expected = _fsd_blueprint_swap("Increased range")
+    assert expected["found"] is True and expected["added"]["blueprint"] == "Increased range"
+    assert _fsd_blueprint_swap(spelling) == expected
+
+
+def test_a_blueprint_that_exists_for_another_group_says_so_and_lists_this_groups(tmp_path):
+    _db(tmp_path)
+    result = _fsd_blueprint_swap("Overcharged")
+    assert result == {
+        "found": False,
+        "reason": f"'Overcharged' grade 1 doesn't apply to frame shift drive. Blueprints available for frame shift drive: {FSD_BLUEPRINTS}.",
+    }
+
+
+def test_a_blueprint_spelled_as_a_journal_name_for_another_group_is_still_a_doesnt_apply(tmp_path):
+    _db(tmp_path)
+    result = _fsd_blueprint_swap("PowerPlant_Boosted")
+    assert result["reason"] == (
+        f"'PowerPlant_Boosted' grade 1 doesn't apply to frame shift drive. Blueprints available for frame shift drive: {FSD_BLUEPRINTS}.")
+
+
+def test_a_made_up_blueprint_is_not_known(tmp_path):
+    _db(tmp_path)
+    result = _fsd_blueprint_swap("Totally Made Up")
+    assert result == {
+        "found": False,
+        "reason": f"Ellie doesn't know a blueprint called 'Totally Made Up'. Blueprints available for frame shift drive: {FSD_BLUEPRINTS}.",
+    }
+
+
+def test_a_power_distributor_lists_its_own_blueprints(tmp_path):
+    _db(tmp_path)
+    result = qf.simulate_module_swap(
+        module_group="power distributor", module_class=5, module_rating="A",
+        variant="int_powerdistributor_size5_class5", blueprint_name="Totally Made Up", grade=1,
+    )
+    assert result["found"] is False
+    assert result["reason"] == (
+        f"Ellie doesn't know a blueprint called 'Totally Made Up'. Blueprints available for power distributor: {PD_BLUEPRINTS}.")
+    other = qf.simulate_module_swap(
+        module_group="power distributor", module_class=5, module_rating="A",
+        variant="int_powerdistributor_size5_class5", blueprint_name="Increased range", grade=1,
+    )
+    assert other["reason"] == (
+        f"'Increased range' grade 1 doesn't apply to power distributor. Blueprints available for power distributor: {PD_BLUEPRINTS}.")
+
+
+def test_a_group_with_no_blueprints_keeps_its_existing_reason(tmp_path):
+    _type9_db(tmp_path)
+    result = qf.simulate_module_swap(module_group="fuel tank", module_class=3, module_rating="C",
+                                     blueprint_name="Lightweight", grade=1)
+    assert result == {"found": False, "reason": "no engineering blueprints exist for fuel tank in Ellie's data"}
+
+
+# --- X6: non-canonical spellings of an occupied hardpoint / utility slot ----------
+
+def _type9_with_booster_in_tiny_1(tmp_path):
+    path = _type9_now(tmp_path, fuel=10.0, cargo=100)
+    _insert_module(path, "TinyHardpoint1", "hpt_shieldbooster_size0_class1")    # 0.5 t, 0.2 MW
+    return path
+
+
+def _booster_swap(slot):
+    return qf.simulate_module_swap(module_group="shield booster", module_class=0, module_rating="A", slot=slot)
+
+
+@pytest.mark.parametrize("spelling", [
+    "Tiny Hardpoint 1", "tinyhardpoint01", "TINYHARDPOINT1", " tiny_hardpoint_1 ", "Tiny  Hardpoint  001",
+])
+def test_other_spellings_of_an_occupied_utility_slot_find_the_fitted_module(tmp_path, spelling):
+    _type9_with_booster_in_tiny_1(tmp_path)
+    canonical = _booster_swap("TinyHardpoint1")
+    assert canonical["removed"] == {"item": "hpt_shieldbooster_size0_class1"}
+    assert canonical["mass_change"] == 3.0 and canonical["power_change"] == 1.0
+    assert _booster_swap(spelling) == canonical     # incl. slot == "TinyHardpoint1", the real name
+
+
+def test_an_empty_utility_slot_spelled_loosely_is_canonicalised(tmp_path):
+    _type9_with_booster_in_tiny_1(tmp_path)
+    loose = _booster_swap("tiny hardpoint 02")
+    assert loose["slot"] == "TinyHardpoint2"
+    assert loose == _booster_swap("TinyHardpoint2")
+
+
+def test_the_fitted_slots_own_name_wins_over_the_canonical_one(tmp_path):
+    """Real journals name hardpoints canonically, so this is defensive: if the
+    fitted slot's name is spelled differently from TinyHardpoint1 (here a
+    zero-padded TinyHardpoint01), a loose spelling resolves to the REAL fitted
+    name, not to a canonical name that would look like an empty slot."""
+    path = _type9_now(tmp_path, fuel=10.0, cargo=100)
+    _insert_module(path, "TinyHardpoint01", "hpt_shieldbooster_size0_class1")
+    for spelling in ("Tiny Hardpoint 1", "tinyhardpoint1", "TINYHARDPOINT01"):
+        result = _booster_swap(spelling)
+        assert result["slot"] == "TinyHardpoint01"
+        assert result["removed"] == {"item": "hpt_shieldbooster_size0_class1"}
+
+
+def test_hardpoint_number_zero_is_rejected_with_a_plain_reason(tmp_path):
+    _type9_with_booster_in_tiny_1(tmp_path)
+    assert _booster_swap("TinyHardpoint0") == {
+        "found": False, "reason": "'TinyHardpoint0' isn't a valid hardpoint slot -- numbering starts at 1"}
+    assert _booster_swap("tiny hardpoint 00")["found"] is False
+
+
+@pytest.mark.parametrize("slot", ["TinyHardpoint1x", "TinyHardpoint1 extra", "xTinyHardpoint1"])
+def test_trailing_or_leading_text_is_not_a_hardpoint_slot(tmp_path, slot):
+    _type9_with_booster_in_tiny_1(tmp_path)
+    result = _booster_swap(slot)
+    assert result["found"] is False
+    assert result["reason"].startswith("Ellie can't simulate swaps in")
+
+
+def test_a_mining_hardpoint_is_only_matched_to_a_fitted_mining_slot(tmp_path):
+    """SmallMiningHardpoint1 fitted: its spaced/zero-padded spellings find it,
+    but plain SmallHardpoint1 is a different (empty) slot."""
+    path = _type9_now(tmp_path, fuel=10.0, cargo=100)
+    _insert_module(path, "SmallMiningHardpoint1", "hpt_beamlaser_fixed_small")
+    fitted = qf.simulate_module_swap(module_group="beam laser", module_class=1, module_rating="E",
+                                     variant="hpt_beamlaser_fixed_small", slot="SmallMiningHardpoint1")
+    assert fitted["removed"] == {"item": "hpt_beamlaser_fixed_small"}
+    for spelling in ("small mining hardpoint 01", "SMALLMININGHARDPOINT1"):
+        again = qf.simulate_module_swap(module_group="beam laser", module_class=1, module_rating="E",
+                                        variant="hpt_beamlaser_fixed_small", slot=spelling)
+        assert again == fitted
+    plain = qf.simulate_module_swap(module_group="beam laser", module_class=1, module_rating="E",
+                                    variant="hpt_beamlaser_fixed_small", slot="small hardpoint 1")
+    assert plain.get("slot") != "SmallMiningHardpoint1" and plain.get("removed", {}).get("item") is None
+
+
+# --- X8: the summary carries the qualifiers ----------------------------------------
+
+def test_summary_names_the_blueprint_and_what_the_numbers_leave_out(tmp_path):
+    """Explorer NX, beam laser into an empty MediumHardpoint1 with a Long range
+    g1 blueprint: mass and power are modelled, three effects are not."""
+    path = _db(tmp_path)
+    _set_ship_state(path, fuel_main=40.0, cargo_count=4)
+    result = qf.simulate_module_swap(
+        module_group="beam laser", module_class=1, module_rating="E",
+        variant="hpt_beamlaser_fixed_small", slot="MediumHardpoint1",
+        blueprint_name="long  range", grade=1,
+    )
+    assert result["added"]["blueprint"] == "Long range"
+    assert result["unmodeled_blueprint_effects"] == ["fallofffromrange", "range", "shotspeed"]
+    assert "caveat" not in result       # an unfitted HARDPOINT slot is confirmed by the ship's layout
+    assert result["summary"].endswith(
+        " Blueprint: Long range grade 1. Not reflected in these numbers: fallofffromrange, range, shotspeed.")
+    assert result["summary"].startswith(
+        "Caspian Explorer: adding hpt_beamlaser_fixed_small in MediumHardpoint1: ")
+
+
+def test_summary_ends_with_the_caveat_for_an_unfitted_internal_slot(tmp_path):
+    _type9_now(tmp_path, fuel=10.0, cargo=100)
+    result = qf.simulate_module_swap(module_group="shield generator", module_class=4, module_rating="A", slot="Slot06_Size4")
+    assert result["summary"] == (
+        "Type-9 Heavy: adding int_shieldgenerator_size4_class5 in Slot06_Size4: "
+        "jump range now 8.39 -> 8.32 ly (-0.07); max 9.16 -> 9.08 ly (-0.08); "
+        "unladen mass 1122.0 -> 1132.0 t (+10.00); power margin 2.71 MW. "
+        "Slot06_Size4 isn't fitted in your current loadout, so Ellie can't confirm it's an empty slot on your ship"
+        " -- these numbers assume it is."
+    )
+
+
+def test_summary_qualifiers_come_in_a_fixed_order_before_the_unavailable_note_and_the_warning(tmp_path):
+    """Note (X1) -> Blueprint -> Not reflected -> caveat -> unavailable note."""
+    result = {
+        "ship_name": "Type-9 Heavy", "slot": "Slot06_Size4",
+        "added": {"symbol": "x", "blueprint": "Lightweight", "blueprint_grade": 2},
+        "removed": {"item": None},
+        "old_jump_range_now": None, "new_jump_range_now": None, "jump_range_change_now": None,
+        "old_jump_range_max": None, "new_jump_range_max": None, "jump_range_change_max": None,
+        "old_unladen_mass": 1122.0, "new_unladen_mass": 1132.0, "mass_change": 10.0,
+        "new_power_margin": 2.71,
+        "capacity_note": "the new hold carries only 8.0 t, so the new range assumes 8.0 t of cargo instead of 9 t",
+        "unmodeled_blueprint_effects": ["a", "b"],
+        "caveat": "assumes an empty slot",
+        "state_note": "current fuel isn't known yet",
+        "warning": "WARN.",
+    }
+    assert qf._swap_summary(result) == (
+        "Type-9 Heavy: adding x in Slot06_Size4: unladen mass 1122.0 -> 1132.0 t (+10.00); power margin 2.71 MW."
+        " Note: the new hold carries only 8.0 t, so the new range assumes 8.0 t of cargo instead of 9 t."
+        " Blueprint: Lightweight grade 2."
+        " Not reflected in these numbers: a, b."
+        " assumes an empty slot."
+        " Current-load jump range unavailable: current fuel isn't known yet."
+        " WARN."
+    )
+    result["caveat"] = "already ends with a period."
+    assert " already ends with a period. Current-load" in qf._swap_summary(result)

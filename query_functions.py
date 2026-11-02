@@ -579,7 +579,8 @@ def _jump_check_warning(conn, params):
     0.01 t, 97% within 0.5 t) and the commander is told so. Returns the
     warning sentence, or None -- also None, silently, when the last jump is
     missing a number the check needs, was boosted (injection changes the
-    jump), or was made with a different drive than the one fitted now.
+    jump), was made with a different drive than the one fitted now, or a
+    Guardian FSD Booster is fitted (see the comment below).
 
     The optimal mass used is the one in force AT the jump (the snapshot's
     last_jump_fsd_optmass if the drive was engineered then, else the base
@@ -588,6 +589,12 @@ def _jump_check_warning(conn, params):
     by the new mass would blame Ellie's model for a drive that never made it."""
     state = _read_ship_state(conn)
     if state is None or not _fsd_params_complete(params):
+        return None
+    if params["booster_bonus"] > 0:
+        # The implied mass below has no booster term while the range model adds
+        # the booster's jumpboost; how a fitted booster changes JumpDist is not
+        # verified (no booster jumps in the real history), so the check stays
+        # out of it, the same honest skip a boosted jump gets.
         return None
     if "last_jump_fsd_optmass" not in state.keys():
         # the watcher hasn't migrated the table since the upgrade: a snapshot
@@ -744,9 +751,7 @@ def _resolve_explicit_slot_casing(conn, explicit_slot):
     """An explicit `slot` is matched case-insensitively (R5) -- against
     what's actually fitted first (the ground truth for real slot names),
     then against the 7 standard names, returning the REAL casing either
-    way. A slot that matches neither (e.g. a genuinely empty utility
-    mount nothing has ever been fitted to) is returned exactly as given;
-    there's nothing to correct it against."""
+    way, or None when it matches neither."""
     row = conn.execute(
         "SELECT slot FROM current_loadout_modules WHERE lower(slot) = lower(?)", (explicit_slot,)
     ).fetchone()
@@ -755,7 +760,49 @@ def _resolve_explicit_slot_casing(conn, explicit_slot):
     for name in STANDARD_SLOT_NAMES.values():
         if name.lower() == explicit_slot.lower():
             return name
-    return explicit_slot
+    return None
+
+
+# Any spelling of a hardpoint/utility slot name, once spaces and underscores
+# are removed: size word, optional "mining", "hardpoint", a zero-padded index.
+_HARDPOINT_NAME_RE = re.compile(r"(tiny|small|medium|large|huge)(mining)?hardpoint0*(\d+)", re.IGNORECASE)
+
+
+def _parse_hardpoint_name(text):
+    """(size_word, is_mining, index) for 'TinyHardpoint1', 'Tiny Hardpoint 1',
+    'tinyhardpoint01', 'SMALLMININGHARDPOINT2' ...; None for anything else
+    (trailing or leading text included: this is a fullmatch)."""
+    m = _HARDPOINT_NAME_RE.fullmatch(re.sub(r"[ _]", "", text.strip()))
+    if not m:
+        return None
+    return m.group(1).lower(), bool(m.group(2)), int(m.group(3))
+
+
+def _resolve_explicit_slot(conn, explicit_slot):
+    """(slot, error) for an explicit `slot` argument: stripped; matched
+    case-insensitively against what's fitted and the 7 standard names (real
+    casing returned); failing that, a hardpoint/utility spelling such as
+    'Tiny Hardpoint 1' or 'tinyhardpoint01' is matched to the FITTED slot with
+    the same size, mining flag and index (otherwise the module actually
+    fitted there would be treated as an empty slot and never subtracted), or
+    canonicalised to 'TinyHardpoint1' style when nothing is fitted there.
+    Hardpoint numbering starts at 1. Anything else is returned as given -- a
+    genuinely empty slot nothing has ever been fitted to has nothing to be
+    corrected against."""
+    slot = explicit_slot.strip()
+    real = _resolve_explicit_slot_casing(conn, slot)
+    if real:
+        return real, None
+    parsed = _parse_hardpoint_name(slot)
+    if parsed is None:
+        return slot, None
+    size_word, mining, index = parsed
+    if index == 0:
+        return None, f"'{slot}' isn't a valid hardpoint slot -- numbering starts at 1"
+    for row in conn.execute("SELECT slot FROM current_loadout_modules").fetchall():
+        if _parse_hardpoint_name(row["slot"]) == parsed:
+            return row["slot"], None
+    return f"{size_word.capitalize()}{'Mining' if mining else ''}Hardpoint{index}", None
 
 
 def _resolve_target_slot(conn, ship_key, grp, explicit_slot):
@@ -773,8 +820,9 @@ def _resolve_target_slot(conn, ship_key, grp, explicit_slot):
     slot-size layout to the journal's own slot names (see the plan's
     Review Focus #2 scope note) -- rather than guess, this asks for an
     explicit slot, the same honest treatment bulkheads already get."""
+    explicit_slot = (explicit_slot or "").strip()
     if explicit_slot:
-        return _resolve_explicit_slot_casing(conn, explicit_slot), None
+        return _resolve_explicit_slot(conn, explicit_slot)
 
     fitted = conn.execute(
         "SELECT clm.slot FROM current_loadout_modules clm "
@@ -813,10 +861,10 @@ def _classify_slot_kind(target_slot):
     already case-corrected by the time this is called (R5)."""
     if target_slot in STANDARD_SLOT_NAMES.values():
         return "standard"
-    m = _HARDPOINT_SLOT_RE.match(target_slot)
+    m = _HARDPOINT_SLOT_RE.fullmatch(target_slot)
     if m:
         return "utility" if m.group(1).lower() == "tiny" else "hardpoint"
-    if _OPTIONAL_INTERNAL_SLOT_RE.match(target_slot):
+    if _OPTIONAL_INTERNAL_SLOT_RE.fullmatch(target_slot):
         return "internal"
     return None
 
@@ -898,6 +946,67 @@ def _kind_mismatch_reason(module_group, grp, module_kind, slot_kind, target_slot
     return None
 
 
+def _blueprint_name_matches(rows, name):
+    """The rows (anything with fdname and upgrade_name) matching a typed
+    blueprint name, by the FIRST of these rules that hits anything, all
+    case-insensitive:
+      1. the display name, stripped and with inner whitespace collapsed
+         ('  Increased  range ' -> 'Increased range');
+      2. the journal's own name ('FSD_LongRange');
+      3. that name without its first 'Module_' segment, underscores ignored
+         ('LongRange', 'long_range');
+      4. the display name with spaces, hyphens, underscores and punctuation
+         removed ('increased-range', 'IncreasedRange').
+    Returns every row the winning rule matched (the caller refuses an
+    ambiguous result rather than picking one)."""
+    raw = name.strip().lower()
+    squashed = re.sub(r"[\W_]+", "", raw)
+
+    def tail(fdname):
+        return fdname.split("_", 1)[1] if "_" in fdname else None
+
+    rules = (
+        lambda r: " ".join(r["upgrade_name"].split()).lower() == " ".join(raw.split()),
+        lambda r: r["fdname"].lower() == raw,
+        lambda r: tail(r["fdname"]) is not None and tail(r["fdname"]).lower().replace("_", "") == raw.replace("_", ""),
+        lambda r: bool(squashed) and re.sub(r"[\W_]+", "", r["upgrade_name"].lower()) == squashed,
+    )
+    for rule in rules:
+        hits = [r for r in rows if rule(r)]
+        if hits:
+            return hits
+    return []
+
+
+def _find_blueprint(conn, grp, grade, blueprint_name, module_group):
+    """(blueprint_row, None) for the one allow-listed blueprint of this grp and
+    grade that `blueprint_name` means, else (None, result_dict) with a reason
+    that says WHY it wasn't found: it exists but not for this group, or isn't
+    a blueprint Ellie knows at all -- and what this group does offer."""
+    candidates = conn.execute(
+        "SELECT cb.fdname, cb.upgrade_name, cb.feature_ranges_json FROM coriolis_blueprints cb "
+        "JOIN module_blueprints mb ON mb.fdname = cb.fdname WHERE mb.grp = ? AND cb.grade = ?",
+        (grp, grade),
+    ).fetchall()
+    hits = _blueprint_name_matches(candidates, blueprint_name)
+    if len(hits) > 1:
+        # Never take the first row. Not reachable with today's data
+        # (verified: 0 upgrade_name collisions within any grp's allow-list at
+        # any grade) -- this guards future data.
+        return None, {"found": False, "reason": f"multiple blueprint definitions match '{blueprint_name}' grade {grade} for {module_group} -- Ellie's data needs a closer look before this can be applied safely"}
+    if hits:
+        return hits[0], None
+
+    available = sorted({r[0] for r in conn.execute(
+        "SELECT cb.upgrade_name FROM coriolis_blueprints cb "
+        "JOIN module_blueprints mb ON mb.fdname = cb.fdname WHERE mb.grp = ?", (grp,))})
+    everything = conn.execute("SELECT DISTINCT fdname, upgrade_name FROM coriolis_blueprints").fetchall()
+    offered = f"Blueprints available for {module_group}: {', '.join(available)}."
+    if _blueprint_name_matches(everything, blueprint_name):
+        return None, {"found": False, "reason": f"'{blueprint_name}' grade {grade} doesn't apply to {module_group}. {offered}"}
+    return None, {"found": False, "reason": f"Ellie doesn't know a blueprint called '{blueprint_name}'. {offered}"}
+
+
 def _entry_class(entry):
     """A ship_stats slots_json hardpoints/internal entry's class -- a
     plain int, or a dict with a "class" key (a reserved/named slot)."""
@@ -932,7 +1041,7 @@ def _internal_slot_collision(conn, nn):
     is wrong, not just unfitted. Verified: 0 repeated NN within one real
     loadout, across 12,764 internal slots."""
     for row in conn.execute("SELECT slot FROM current_loadout_modules").fetchall():
-        m = _OPTIONAL_INTERNAL_SLOT_RE.match(row["slot"])
+        m = _OPTIONAL_INTERNAL_SLOT_RE.fullmatch(row["slot"])
         if m and int(m.group(1)) == nn:
             return row["slot"]
     return None
@@ -972,7 +1081,7 @@ def _slot_size_and_existence(conn, ship_row, ship_key, target_slot, slot_kind, o
         return standard_sizes[STANDARD_SLOTS_ORDER.index(owner_grp)], False, None
 
     if slot_kind in ("hardpoint", "utility"):
-        m = _HARDPOINT_SLOT_RE.match(target_slot)
+        m = _HARDPOINT_SLOT_RE.fullmatch(target_slot)
         size_word, index = m.group(1).lower(), int(m.group(2))
         max_class = _HARDPOINT_MAX_CLASS[size_word]
         if not old_module_row:
@@ -987,7 +1096,7 @@ def _slot_size_and_existence(conn, ship_row, ship_key, target_slot, slot_kind, o
         return max_class, False, None
 
     if slot_kind == "internal":
-        m = _OPTIONAL_INTERNAL_SLOT_RE.match(target_slot)
+        m = _OPTIONAL_INTERNAL_SLOT_RE.fullmatch(target_slot)
         nn, size_m = int(m.group(1)), int(m.group(2))
         if old_module_row:
             max_class = size_m
@@ -1189,6 +1298,43 @@ def _effective_plant_output(conn, target_slot, new_module, features):
     return pgen, pgen
 
 
+def _module_tank_fuel(module_row):
+    """Tonnes of fuel a fuel-tank module holds (module_stats `fuel`), else 0."""
+    if module_row is None or module_row["grp"] != "ft":
+        return 0.0
+    return new_module_extra_get(module_row, "fuel") or 0.0
+
+
+def _module_rack_cargo(module_row, modifiers_json=None):
+    """Tonnes a cargo rack holds, else 0: the journal's engineered
+    CargoCapacity modifier when this is a fitted rack that has one (the
+    Loadout's CargoCapacity is the sum of exactly these, verified on every real
+    Loadout), else module_stats `cargo`. A hypothetical rack has no modifiers,
+    so it is its base capacity."""
+    if module_row is None or module_row["grp"] not in ("cr", "crl"):
+        return 0.0
+    engineered = _engineered_modifier(modifiers_json, "CargoCapacity")
+    return engineered if engineered is not None else (new_module_extra_get(module_row, "cargo") or 0.0)
+
+
+def _capped(now, capacity):
+    """What of `now` fits in `capacity` (None = unknown capacity: no cap)."""
+    return now if capacity is None else max(0.0, min(now, capacity))
+
+
+def _capacity_note(fuel_now, fuel_capacity, cargo_now, cargo_capacity):
+    """Why the new range assumes less fuel or cargo than is aboard now, or None
+    when nothing is cut. A change below 1e-6 t is float noise, not a cap."""
+    notes = []
+    if fuel_capacity is not None and fuel_now - max(0.0, fuel_capacity) > 1e-6:
+        cap = round(max(0.0, fuel_capacity), 2)
+        notes.append(f"the new tank holds only {cap} t, so the new range assumes {cap} t of fuel instead of {round(fuel_now, 2)} t")
+    if cargo_capacity is not None and cargo_now - max(0.0, cargo_capacity) > 1e-6:
+        cap = round(max(0.0, cargo_capacity), 2)
+        notes.append(f"the new hold carries only {cap} t, so the new range assumes {cap} t of cargo instead of {round(cargo_now, 2)} t")
+    return "; ".join(notes) or None
+
+
 def _swap_summary(result):
     """One sentence with the whole before/after, built FROM the structured
     result so every number in it is, by construction, one the result also
@@ -1226,6 +1372,17 @@ def _swap_summary(result):
 
     summary = f"{result['ship_name']}: {action} in {result['slot']}"
     summary += (": " + "; ".join(clauses) + ".") if clauses else "."
+    # qualifiers, in a fixed order: what the new capacities did to the range,
+    # which blueprint was applied, what it does that the numbers leave out,
+    # and the caveat about an empty slot that couldn't be confirmed
+    if result.get("capacity_note"):
+        summary += f" Note: {result['capacity_note']}."
+    if result["added"].get("blueprint"):
+        summary += f" Blueprint: {result['added']['blueprint']} grade {result['added']['blueprint_grade']}."
+    if result.get("unmodeled_blueprint_effects"):
+        summary += f" Not reflected in these numbers: {', '.join(result['unmodeled_blueprint_effects'])}."
+    if result.get("caveat"):
+        summary += " " + result["caveat"] + ("" if result["caveat"].endswith(".") else ".")
     if result["state_note"]:
         summary += f" Current-load jump range unavailable: {result['state_note']}."
     if result.get("warning"):
@@ -1382,21 +1539,11 @@ def simulate_module_swap(module_group: str, module_class: int, module_rating: st
             if allow_list_count == 0:
                 return {"found": False, "reason": f"no engineering blueprints exist for {module_group} in Ellie's data"}
 
-            bp_rows = conn.execute(
-                "SELECT cb.fdname, cb.feature_ranges_json FROM coriolis_blueprints cb "
-                "JOIN module_blueprints mb ON mb.fdname = cb.fdname "
-                "WHERE mb.grp = ? AND cb.grade = ? AND lower(cb.upgrade_name) = lower(?)",
-                (grp, grade, blueprint_name),
-            ).fetchall()
-            if not bp_rows:
-                return {"found": False, "reason": f"'{blueprint_name}' grade {grade} doesn't apply to {module_group}"}
-            if len(bp_rows) > 1:
-                # Never take the first row. Not reachable with today's data
-                # (verified: 0 upgrade_name collisions within any grp's
-                # allow-list at any grade) -- this guards future data.
-                return {"found": False, "reason": f"multiple blueprint definitions match '{blueprint_name}' grade {grade} for {module_group} -- Ellie's data needs a closer look before this can be applied safely"}
+            blueprint_row, blueprint_miss = _find_blueprint(conn, grp, grade, blueprint_name, module_group)
+            if blueprint_miss:
+                return blueprint_miss
 
-            features = json.loads(bp_rows[0]["feature_ranges_json"])
+            features = json.loads(blueprint_row["feature_ranges_json"])
             applied_keys = set()
             if "mass" in features:
                 new_mass_min, new_mass_max = apply_blueprint_delta(new_module["mass"] or 0.0, features["mass"])
@@ -1408,7 +1555,7 @@ def simulate_module_swap(module_group: str, module_class: int, module_rating: st
                 applied_keys.add("optmass")  # applied separately below, in the jump-range section
             if target_slot == STANDARD_SLOT_NAMES["pp"] and "pgen" in features:
                 applied_keys.add("pgen")  # applied separately below, in the power-margin section
-            blueprint_note = blueprint_name
+            blueprint_note = blueprint_row["upgrade_name"]   # the display name, however the caller spelled it
             # honesty check: a features key this code doesn't know how to apply
             # (e.g. a weapon's "damage"/"rof") must be reported, never silently
             # dropped -- the numbers below would otherwise look complete while
@@ -1489,17 +1636,32 @@ def simulate_module_swap(module_group: str, module_class: int, module_rating: st
         # resolved above for the maximum figure.
         fuel_now, cargo_now, state_usable, state_note = _current_ship_state(conn, fitted_fsd)
         old_range_now = new_range_now_min = new_range_now_max = None
+        capacity_note = None
         if state_usable:
+            # The swap can change what the ship can hold: the new figures use
+            # the fuel and cargo that still fit (old_* and the reported
+            # fuel_now/cargo_now stay the real current values). Capacities are
+            # the Loadout's own totals less the removed module's share plus the
+            # added module's.
+            new_fuel_capacity = new_cargo_capacity = None
+            if baseline["fuel_main"] is not None:
+                new_fuel_capacity = baseline["fuel_main"] - _module_tank_fuel(old_stats) + _module_tank_fuel(new_module)
+            if baseline["cargo_capacity"] is not None:
+                removed_cargo = _module_rack_cargo(old_stats, old_module_row["engineering_modifiers_json"] if old_module_row else None)
+                new_cargo_capacity = baseline["cargo_capacity"] - removed_cargo + _module_rack_cargo(new_module)
+            fuel_for_new = _capped(fuel_now, new_fuel_capacity)
+            cargo_for_new = _capped(cargo_now, new_cargo_capacity)
+            capacity_note = _capacity_note(fuel_now, new_fuel_capacity, cargo_now, new_cargo_capacity)
             old_range_now = compute_current_jump_range(
                 baseline["unladen_mass"], fuel_now, cargo_now, fitted_fsd["optmass"], fitted_fsd["maxfuel"],
                 fitted_fsd["fuelmul"], fitted_fsd["fuelpower"], fitted_fsd["booster_bonus"],
             )
             if new_range_min is not None:
                 new_range_now_min = compute_current_jump_range(
-                    new_unladen_max, fuel_now, cargo_now, optmass_min, fsd_maxfuel, fsd_fuelmul, fsd_fuelpower, booster_bonus,
+                    new_unladen_max, fuel_for_new, cargo_for_new, optmass_min, fsd_maxfuel, fsd_fuelmul, fsd_fuelpower, booster_bonus,
                 )
                 new_range_now_max = compute_current_jump_range(
-                    new_unladen_min, fuel_now, cargo_now, optmass_max, fsd_maxfuel, fsd_fuelmul, fsd_fuelpower, booster_bonus,
+                    new_unladen_min, fuel_for_new, cargo_for_new, optmass_max, fsd_maxfuel, fsd_fuelmul, fsd_fuelpower, booster_bonus,
                 )
         old_range_max = baseline["max_jump_range"]  # the game's own MaxJumpRange
         range_change_max = range_change_now = None
@@ -1531,6 +1693,7 @@ def simulate_module_swap(module_group: str, module_class: int, module_rating: st
             "added": {
                 "symbol": new_module["symbol"], "class": module_class, "rating": module_rating,
                 "blueprint": blueprint_note,
+                "blueprint_grade": grade if blueprint_note else None,
                 "mass": _min_max_or_single(new_mass_min, new_mass_max),
                 "power": _min_max_or_single(new_power_min, new_power_max),
             },
@@ -1551,6 +1714,8 @@ def simulate_module_swap(module_group: str, module_class: int, module_rating: st
             "power_unknown_modules": unknown_power_items,  # honestly-reported, never silently dropped
             "unmodeled_blueprint_effects": unmodeled_keys,  # honestly-reported, never silently dropped
         }
+        if capacity_note:
+            result["capacity_note"] = capacity_note
         if caveat:
             # S3(c): only on the "unfitted internal slot, existence inferred
             # not confirmed" path -- Task 6 relays this to the model.
