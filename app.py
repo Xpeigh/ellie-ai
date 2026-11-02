@@ -15,6 +15,9 @@ Then open http://127.0.0.1:8420 (or just let pywebview open it, later).
 import sqlite3
 import sys
 import threading
+import time
+import traceback
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import uvicorn
@@ -43,25 +46,46 @@ _history = [{"role": "system", "content": ellie_chat.SYSTEM_PROMPT}]
 _history_lock = threading.Lock()
 
 
+# How long to wait before starting the watcher again after it stops.
+WATCHER_RESTART_SECONDS = 5
+
+
+def watch_forever(target, sleep=time.sleep, delay=None):
+    """Keep `target` (the journal watcher) running for as long as the app
+    does: if it raises or returns, say so on stderr, wait `delay` seconds
+    (WATCHER_RESTART_SECONDS by default) and start it again. A watcher thread
+    that simply died would leave the tools quietly serving stale fuel and
+    loadout. `sleep` is injectable so a test doesn't have to wait."""
+    if delay is None:
+        delay = WATCHER_RESTART_SECONDS
+    while True:
+        try:
+            target()
+            print("[journal_watcher] returned unexpectedly -- restarting", file=sys.stderr)
+        except FileNotFoundError as e:
+            # no journal yet (the game hasn't run): one line per retry, not a traceback
+            print(f"[journal_watcher] {e} -- live status/materials won't update until this is fixed; retrying", file=sys.stderr)
+        except Exception:
+            traceback.print_exc()
+            print("[journal_watcher] stopped unexpectedly -- restarting", file=sys.stderr)
+        sleep(delay)
+
+
 def _run_watcher():
-    try:
-        journal_watcher.main()
-    except FileNotFoundError as e:
-        print(f"[journal_watcher] {e} -- live status/materials won't update until this is fixed.")
-    except Exception as e:
-        print(f"[journal_watcher] stopped unexpectedly: {e}")
+    watch_forever(journal_watcher.main)
 
 
 def _ensure_live_tables():
     # Same call setup.py itself makes -- so a bare `python app.py` on a
     # fresh clone doesn't fail its very first status poll if setup.py was
     # never run.
-    conn = sqlite3.connect(journal_watcher.DB_PATH)
+    conn = sqlite3.connect(journal_watcher.DB_PATH, timeout=30)
     conn.execute("PRAGMA journal_mode=WAL;")
     journal_watcher.build_schema(conn)
     conn.close()
 
 
+@asynccontextmanager
 async def lifespan(app: FastAPI):
     _ensure_live_tables()
     threading.Thread(target=_run_watcher, daemon=True).start()

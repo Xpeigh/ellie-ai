@@ -110,8 +110,14 @@ _ZERO_DRAW_SUBSTRINGS = ("_armour_", "_shipkit", "customisation_")
 
 
 def _connect():
-    conn = sqlite3.connect(DB_PATH)
+    """A connection for ONE tool call, already inside a read transaction
+    (isolation_level=None + an explicit BEGIN), so every SELECT of the call
+    sees one snapshot even while journal_watcher commits. The database is in
+    WAL mode, where a reader never blocks the writer. Callers close it in a
+    try/finally."""
+    conn = sqlite3.connect(DB_PATH, isolation_level=None)
     conn.row_factory = sqlite3.Row
+    conn.execute("BEGIN")
     return conn
 
 
@@ -150,45 +156,43 @@ def get_blueprint(module_name: str, upgrade_name: str, grade: int) -> dict:
     Returns {"found": False} if neither source has it."""
     grade = int(grade)  # models don't always return args matching the declared type (e.g. "3" not 3)
     conn = _connect()
+    try:
+        row = conn.execute(
+            "SELECT materials_json, modifiers_text FROM graded_blueprints "
+            "WHERE lower(module_name) = lower(?) AND lower(upgrade) = lower(?) AND grade = ?",
+            (module_name, upgrade_name, grade),
+        ).fetchone()
+        if row:
+            return {
+                "found": True,
+                "source": "excel",
+                "module": module_name,
+                "upgrade": upgrade_name,
+                "grade": grade,
+                "materials": _materials_to_dict(row["materials_json"]),
+                "effect": row["modifiers_text"],
+            }
 
-    row = conn.execute(
-        "SELECT materials_json, modifiers_text FROM graded_blueprints "
-        "WHERE lower(module_name) = lower(?) AND lower(upgrade) = lower(?) AND grade = ?",
-        (module_name, upgrade_name, grade),
-    ).fetchone()
-    if row:
+        keywords = MODULE_TO_CORIOLIS_KEYWORDS.get(module_name)
+        if keywords:
+            candidates = conn.execute(
+                "SELECT applies_to, materials_json, feature_ranges_json FROM coriolis_blueprints "
+                "WHERE grade = ? AND lower(upgrade_name) = lower(?)",
+                (grade, upgrade_name),
+            ).fetchall()
+            for c in candidates:
+                if any(kw in c["applies_to"].lower() for kw in keywords):
+                    return {
+                        "found": True,
+                        "source": "coriolis",
+                        "module": module_name,
+                        "upgrade": upgrade_name,
+                        "grade": grade,
+                        "materials": _materials_to_dict(c["materials_json"]),
+                        "effect": None,  # Coriolis gives numeric feature ranges, not descriptive text
+                    }
+    finally:
         conn.close()
-        return {
-            "found": True,
-            "source": "excel",
-            "module": module_name,
-            "upgrade": upgrade_name,
-            "grade": grade,
-            "materials": _materials_to_dict(row["materials_json"]),
-            "effect": row["modifiers_text"],
-        }
-
-    keywords = MODULE_TO_CORIOLIS_KEYWORDS.get(module_name)
-    if keywords:
-        candidates = conn.execute(
-            "SELECT applies_to, materials_json, feature_ranges_json FROM coriolis_blueprints "
-            "WHERE grade = ? AND lower(upgrade_name) = lower(?)",
-            (grade, upgrade_name),
-        ).fetchall()
-        for c in candidates:
-            if any(kw in c["applies_to"].lower() for kw in keywords):
-                conn.close()
-                return {
-                    "found": True,
-                    "source": "coriolis",
-                    "module": module_name,
-                    "upgrade": upgrade_name,
-                    "grade": grade,
-                    "materials": _materials_to_dict(c["materials_json"]),
-                    "effect": None,  # Coriolis gives numeric feature ranges, not descriptive text
-                }
-
-    conn.close()
     return {"found": False, "module": module_name, "upgrade": upgrade_name, "grade": grade}
 
 
@@ -198,29 +202,29 @@ def get_experimental_effect(module_name: str, effect_name: str) -> dict:
     cost, no grade 1-5). Checks Excel's ungraded_costs first, falls back
     to Coriolis's coriolis_experimental_effects."""
     conn = _connect()
+    try:
+        row = conn.execute(
+            "SELECT materials_json, modifiers_text FROM ungraded_costs "
+            "WHERE lower(module_name) = lower(?) AND lower(effect) = lower(?)",
+            (module_name, effect_name),
+        ).fetchone()
+        if row:
+            return {
+                "found": True,
+                "source": "excel",
+                "module": module_name,
+                "effect_name": effect_name,
+                "materials": _materials_to_dict(row["materials_json"]),
+                "description": row["modifiers_text"],
+            }
 
-    row = conn.execute(
-        "SELECT materials_json, modifiers_text FROM ungraded_costs "
-        "WHERE lower(module_name) = lower(?) AND lower(effect) = lower(?)",
-        (module_name, effect_name),
-    ).fetchone()
-    if row:
+        row = conn.execute(
+            "SELECT name, description, materials_json FROM coriolis_experimental_effects "
+            "WHERE lower(name) = lower(?)",
+            (effect_name,),
+        ).fetchone()
+    finally:
         conn.close()
-        return {
-            "found": True,
-            "source": "excel",
-            "module": module_name,
-            "effect_name": effect_name,
-            "materials": _materials_to_dict(row["materials_json"]),
-            "description": row["modifiers_text"],
-        }
-
-    row = conn.execute(
-        "SELECT name, description, materials_json FROM coriolis_experimental_effects "
-        "WHERE lower(name) = lower(?)",
-        (effect_name,),
-    ).fetchone()
-    conn.close()
     if row:
         return {
             "found": True,
@@ -258,16 +262,18 @@ def missing_materials(module_name: str, upgrade_name: str, grade: int) -> dict:
 
     conn = _connect()
     missing, have_enough = {}, True
-    for material, needed_qty in blueprint["materials"].items():
-        row = conn.execute(
-            "SELECT count FROM materials_inventory WHERE material_name = ?",
-            (_material_key(material),),
-        ).fetchone()
-        on_hand = row["count"] if row else 0
-        if on_hand < needed_qty:
-            missing[material] = {"need": needed_qty, "have": on_hand, "short_by": needed_qty - on_hand}
-            have_enough = False
-    conn.close()
+    try:
+        for material, needed_qty in blueprint["materials"].items():
+            row = conn.execute(
+                "SELECT count FROM materials_inventory WHERE material_name = ?",
+                (_material_key(material),),
+            ).fetchone()
+            on_hand = row["count"] if row else 0
+            if on_hand < needed_qty:
+                missing[material] = {"need": needed_qty, "have": on_hand, "short_by": needed_qty - on_hand}
+                have_enough = False
+    finally:
+        conn.close()
 
     return {
         "found": True,
@@ -285,27 +291,27 @@ def missing_materials(module_name: str, upgrade_name: str, grade: int) -> dict:
 def get_engineer(name: str) -> dict:
     """An engineer's location, prerequisites, and what they unlock."""
     conn = _connect()
-    row = conn.execute(
-        "SELECT * FROM engineers WHERE lower(name) = lower(?)", (name,)
-    ).fetchone()
-    if not row:
+    try:
+        row = conn.execute(
+            "SELECT * FROM engineers WHERE lower(name) = lower(?)", (name,)
+        ).fetchone()
+        if not row:
+            return {"found": False, "name": name}
+
+        result = dict(row)
+        if row["engineer_type"] == "ship_module":
+            unlocks = conn.execute(
+                "SELECT grade, item FROM engineer_unlocks WHERE engineer_name = ? ORDER BY grade",
+                (row["name"],),
+            ).fetchall()
+            result["unlocks_by_grade"] = {u["grade"]: u["item"] for u in unlocks}
+        else:
+            upgrades = conn.execute(
+                "SELECT upgrade FROM personal_upgrades WHERE engineer_name = ?", (row["name"],)
+            ).fetchall()
+            result["upgrades"] = [u["upgrade"] for u in upgrades]
+    finally:
         conn.close()
-        return {"found": False, "name": name}
-
-    result = dict(row)
-    if row["engineer_type"] == "ship_module":
-        unlocks = conn.execute(
-            "SELECT grade, item FROM engineer_unlocks WHERE engineer_name = ? ORDER BY grade",
-            (row["name"],),
-        ).fetchall()
-        result["unlocks_by_grade"] = {u["grade"]: u["item"] for u in unlocks}
-    else:
-        upgrades = conn.execute(
-            "SELECT upgrade FROM personal_upgrades WHERE engineer_name = ?", (row["name"],)
-        ).fetchall()
-        result["upgrades"] = [u["upgrade"] for u in upgrades]
-
-    conn.close()
     result["found"] = True
     return result
 
@@ -385,7 +391,14 @@ def player_state() -> dict:
 
 def _player_state() -> dict:
     conn = _connect()
-    status_row = conn.execute("SELECT * FROM commander_status WHERE id = 1").fetchone()
+    try:
+        status_row = conn.execute("SELECT * FROM commander_status WHERE id = 1").fetchone()
+        materials = conn.execute(
+            "SELECT category, COUNT(*) as distinct_materials, SUM(count) as total_units "
+            "FROM materials_inventory WHERE count > 0 GROUP BY category"
+        ).fetchall()
+    finally:
+        conn.close()
     status = dict(status_row) if status_row else {}
     status.pop("id", None)
 
@@ -395,12 +408,6 @@ def _player_state() -> dict:
     status["cqc_rank_name"] = _rank_name(CQC_RANKS, status.get("cqc_rank"))
     status["federation_rank_name"] = _rank_name(FEDERATION_RANKS, status.get("federation_rank"))
     status["empire_rank_name"] = _rank_name(EMPIRE_RANKS, status.get("empire_rank"))
-
-    materials = conn.execute(
-        "SELECT category, COUNT(*) as distinct_materials, SUM(count) as total_units "
-        "FROM materials_inventory WHERE count > 0 GROUP BY category"
-    ).fetchall()
-    conn.close()
 
     materials_summary = {
         m["category"] or "Unknown": {"distinct_materials": m["distinct_materials"], "total_units": m["total_units"]}
@@ -416,11 +423,13 @@ def get_material_count(material_name: str) -> dict:
     this for "how much X do I have" instead of trying to read it off
     player_state()'s summary."""
     conn = _connect()
-    row = conn.execute(
-        "SELECT display_name, category, count FROM materials_inventory WHERE material_name = ?",
-        (_material_key(material_name),),
-    ).fetchone()
-    conn.close()
+    try:
+        row = conn.execute(
+            "SELECT display_name, category, count FROM materials_inventory WHERE material_name = ?",
+            (_material_key(material_name),),
+        ).fetchone()
+    finally:
+        conn.close()
     if not row:
         return {"found": False, "material_name": material_name}
     return {"found": True, "material_name": row["display_name"], "category": row["category"], "count": row["count"]}
@@ -436,24 +445,24 @@ def distance_to_system(system_name: str) -> dict:
     destination is reported as not found, with that reason spelled out so
     it isn't mistaken for "doesn't exist"."""
     conn = _connect()
+    try:
+        current = conn.execute("SELECT * FROM commander_status WHERE id = 1").fetchone()
+        if not current or not current["current_system"]:
+            return {"found": False, "reason": "current system unknown -- journal_watcher may not be running"}
 
-    current = conn.execute("SELECT * FROM commander_status WHERE id = 1").fetchone()
-    if not current or not current["current_system"]:
-        conn.close()
-        return {"found": False, "reason": "current system unknown -- journal_watcher may not be running"}
-
-    # journal coordinates first; the EDSM lookup covers a database the
-    # watcher hasn't migrated/updated yet (no coordinate columns, or NULL)
-    if "current_x" in current.keys() and current["current_x"] is not None:
-        origin = {"x": current["current_x"], "y": current["current_y"], "z": current["current_z"]}
-    else:
-        origin = conn.execute(
-            "SELECT x, y, z FROM edsm_systems WHERE lower(name) = lower(?)", (current["current_system"],)
+        # journal coordinates first; the EDSM lookup covers a database the
+        # watcher hasn't migrated/updated yet (no coordinate columns, or NULL)
+        if "current_x" in current.keys() and current["current_x"] is not None:
+            origin = {"x": current["current_x"], "y": current["current_y"], "z": current["current_z"]}
+        else:
+            origin = conn.execute(
+                "SELECT x, y, z FROM edsm_systems WHERE lower(name) = lower(?)", (current["current_system"],)
+            ).fetchone()
+        destination = conn.execute(
+            "SELECT name, x, y, z FROM edsm_systems WHERE lower(name) = lower(?)", (system_name,)
         ).fetchone()
-    destination = conn.execute(
-        "SELECT name, x, y, z FROM edsm_systems WHERE lower(name) = lower(?)", (system_name,)
-    ).fetchone()
-    conn.close()
+    finally:
+        conn.close()
 
     if not origin:
         return {"found": False, "reason": f"coordinates for current system '{current['current_system']}' unknown"}
@@ -721,10 +730,12 @@ def get_ship_info(ship_name: str) -> dict:
     coriolis-data via ingest_ship_modules.py. Matches by display name
     (e.g. "Python") case-insensitively."""
     conn = _connect()
-    row = conn.execute(
-        "SELECT * FROM ship_stats WHERE lower(name) = lower(?)", (ship_name,)
-    ).fetchone()
-    conn.close()
+    try:
+        row = conn.execute(
+            "SELECT * FROM ship_stats WHERE lower(name) = lower(?)", (ship_name,)
+        ).fetchone()
+    finally:
+        conn.close()
     if not row:
         return {"found": False, "ship_name": ship_name}
     return {

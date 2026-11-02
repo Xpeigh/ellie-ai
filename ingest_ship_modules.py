@@ -27,21 +27,44 @@ MODULE_DIRS = ["standard", "internal", "hardpoints"]
 _CORE_FIELDS = {"symbol", "id", "edID", "grp", "class", "rating", "mass", "power", "cost"}
 
 
-def build_schema(conn):
-    conn.executescript(
+def require_inputs(repo_path):
+    """Check, before the database is touched, that every input this ingest reads
+    exists: the ships/ and modules/{standard,internal,hardpoints}/ folders (each
+    holding .json files) and modifications/modules.json. Raises FileNotFoundError
+    naming the missing path -- a half-cloned coriolis-data must fail here, not
+    after the old tables have been dropped."""
+    repo = Path(repo_path)
+    for folder in [repo / "ships"] + [repo / "modules" / sub for sub in MODULE_DIRS]:
+        if not folder.is_dir():
+            raise FileNotFoundError(f"coriolis-data input folder not found: {folder}")
+        if not any(folder.glob("*.json")):
+            raise FileNotFoundError(f"coriolis-data input folder has no .json files: {folder}")
+    allow_list = repo / "modifications" / "modules.json"
+    if not allow_list.is_file():
+        raise FileNotFoundError(f"coriolis-data blueprint allow-list not found: {allow_list}")
+
+
+def build_schema(conn, commit=True):
+    # Individual statements, not executescript(): executescript commits any open
+    # transaction first, which would break ingest_all's single transaction.
+    conn.execute("DROP TABLE IF EXISTS ship_stats")
+    conn.execute("DROP TABLE IF EXISTS module_stats")
+    conn.execute(
         """
-        DROP TABLE IF EXISTS ship_stats;
-        DROP TABLE IF EXISTS module_stats;
         CREATE TABLE ship_stats (
             ship_key TEXT PRIMARY KEY, ed_id INTEGER, name TEXT, manufacturer TEXT,
             hull_mass REAL, properties_json TEXT, slots_json TEXT, defaults_json TEXT,
             bulkheads_json TEXT
-        );
+        )
+        """
+    )
+    conn.execute(
+        """
         CREATE TABLE module_stats (
             symbol TEXT PRIMARY KEY, coriolis_id TEXT, ed_id INTEGER, grp TEXT,
             class INTEGER, rating TEXT, mass REAL, power REAL, cost INTEGER,
             extra_json TEXT
-        );
+        )
         """
     )
     # module_blueprints is CREATE TABLE IF NOT EXISTS, not DROP+CREATE like
@@ -50,19 +73,23 @@ def build_schema(conn):
     # (see setup.py), so this ingest script is the only place an EXISTING
     # install ever gets this table. Dropping it here would be harmless on
     # a fresh install but would defeat that upgrade path on an existing one.
-    conn.executescript(
+    conn.execute(
         """
         CREATE TABLE IF NOT EXISTS module_blueprints (
             grp TEXT, fdname TEXT, PRIMARY KEY (grp, fdname)
-        );
+        )
         """
     )
-    conn.commit()
+    if commit:
+        conn.commit()
 
 
-def build_ships(conn, repo_path):
+def build_ships(conn, repo_path, commit=True):
+    ships_dir = Path(repo_path) / "ships"
+    if not ships_dir.is_dir():
+        raise FileNotFoundError(f"coriolis-data input folder not found: {ships_dir}")
     count = 0
-    for path in sorted((Path(repo_path) / "ships").glob("*.json")):
+    for path in sorted(ships_dir.glob("*.json")):
         data = json.load(open(path, encoding="utf-8"))
         for ship_key, entry in data.items():
             props = entry.get("properties", {})
@@ -81,7 +108,8 @@ def build_ships(conn, repo_path):
                 ),
             )
             count += 1
-    conn.commit()
+    if commit:
+        conn.commit()
     return count
 
 
@@ -110,12 +138,15 @@ def _is_better_entry(candidate, existing):
     return False
 
 
-def build_modules(conn, repo_path):
+def build_modules(conn, repo_path, commit=True):
     # Collect all candidate entries per symbol, selecting the best per our precedence rules
     best_by_symbol = {}
 
     for subdir in MODULE_DIRS:
-        for path in sorted((Path(repo_path) / "modules" / subdir).glob("*.json")):
+        module_dir = Path(repo_path) / "modules" / subdir
+        if not module_dir.is_dir():
+            raise FileNotFoundError(f"coriolis-data input folder not found: {module_dir}")
+        for path in sorted(module_dir.glob("*.json")):
             data = json.load(open(path, encoding="utf-8"))
             for _group_key, variants in data.items():
                 if not isinstance(variants, list):
@@ -151,11 +182,12 @@ def build_modules(conn, repo_path):
                 json.dumps(extra),
             ),
         )
-    conn.commit()
+    if commit:
+        conn.commit()
     return count
 
 
-def build_module_blueprints(conn, repo_path):
+def build_module_blueprints(conn, repo_path, commit=True):
     """Ingests modifications/modules.json's per-grp blueprint allow-list --
     which fdnames (e.g. "MC_Overcharged") a grp (e.g. "mc") can actually
     take, per Coriolis's own data. This is NOT the same thing as
@@ -175,20 +207,41 @@ def build_module_blueprints(conn, repo_path):
         for fdname in (entry.get("blueprints") or {}):
             conn.execute("INSERT OR REPLACE INTO module_blueprints VALUES (?,?)", (grp, fdname))
             count += 1
-    conn.commit()
+    if commit:
+        conn.commit()
     return count
 
 
+def ingest_all(conn, repo_path):
+    """Rebuild ship_stats, module_stats and module_blueprints from coriolis-data
+    as ONE transaction, after checking that every input exists. A failure part
+    way (a bad file, a full disk) rolls everything back, so the previous three
+    tables are still there, complete, instead of a half-built set. Returns
+    (ship_count, module_count, blueprint_count)."""
+    require_inputs(repo_path)
+    conn.execute("BEGIN")
+    try:
+        build_schema(conn, commit=False)
+        ship_count = build_ships(conn, repo_path, commit=False)
+        module_count = build_modules(conn, repo_path, commit=False)
+        blueprint_count = build_module_blueprints(conn, repo_path, commit=False)
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    return ship_count, module_count, blueprint_count
+
+
 def main():
+    require_inputs(REPO_PATH)    # before even opening (and so creating) the database
     conn = sqlite3.connect(DB_PATH)
-    build_schema(conn)
-    ship_count = build_ships(conn, REPO_PATH)
-    module_count = build_modules(conn, REPO_PATH)
-    blueprint_count = build_module_blueprints(conn, REPO_PATH)
+    try:
+        ship_count, module_count, blueprint_count = ingest_all(conn, REPO_PATH)
+    finally:
+        conn.close()
     print(f"ship_stats: {ship_count} rows")
     print(f"module_stats: {module_count} rows")
     print(f"module_blueprints: {blueprint_count} rows")
-    conn.close()
 
 
 if __name__ == "__main__":

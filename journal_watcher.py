@@ -30,6 +30,7 @@ didn't:
 """
 import json
 import sqlite3
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -37,6 +38,11 @@ from pathlib import Path
 JOURNAL_DIR = Path.home() / "Saved Games" / "Frontier Developments" / "Elite Dangerous"
 DB_PATH = Path(__file__).resolve().parent / "elite-dangerous.db"
 POLL_INTERVAL_SECONDS = 2
+
+# How often a bad event has been skipped since the watcher started, and the
+# last such message -- so something (a status line, a test) can tell a watcher
+# that is healthy from one that is quietly dropping events.
+WATCHER_STATS = {"errors": 0, "last_error": None}
 
 
 def find_latest_journal(journal_dir=JOURNAL_DIR):
@@ -470,10 +476,34 @@ def process_event(conn, event):
         set_loadout(conn, event)
 
 
+def process_event_safely(conn, event):
+    """process_event, but one bad event or a locked database must not end the
+    watcher (under app.py a dead watcher thread is silent, and the tools keep
+    serving stale fuel and loadout): roll back whatever the event half-did,
+    say so on stderr, count it in WATCHER_STATS, and carry on with the next
+    event. Returns True when the event was applied."""
+    try:
+        process_event(conn, event)
+        return True
+    except Exception as e:
+        try:
+            conn.rollback()
+        except sqlite3.Error:
+            pass
+        kind = event.get("event") if isinstance(event, dict) else type(event).__name__
+        message = f"journal_watcher: skipped a {kind} event: {type(e).__name__}: {e}"
+        print(message, file=sys.stderr)
+        WATCHER_STATS["errors"] += 1
+        WATCHER_STATS["last_error"] = message
+        return False
+
+
 def replay_journal(conn, path):
     print(f"Replaying {path.name} from the start...")
     count = 0
-    with open(path, "r", encoding="utf-8") as f:
+    # errors="replace": a stray undecodable byte garbles one line (skipped
+    # below) instead of raising out of the whole replay
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -482,14 +512,14 @@ def replay_journal(conn, path):
                 event = json.loads(line)
             except json.JSONDecodeError:
                 continue  # a partially-written last line while the game is live -- skip, tailing will pick it up whole later
-            process_event(conn, event)
-            count += 1
+            if process_event_safely(conn, event):
+                count += 1
     print(f"Replay complete: {count} events processed.")
 
 
 def follow_journal(conn, path):
     print(f"Tailing {path.name} for new events (checking every {POLL_INTERVAL_SECONDS}s)...")
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
         f.seek(0, 2)  # start at current end -- replay already covered everything before this
         while True:
             # a new session (game restart/crash) writes a NEW journal file rather
@@ -510,11 +540,13 @@ def follow_journal(conn, path):
                 event = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            process_event(conn, event)
+            process_event_safely(conn, event)
 
 
 def main():
-    conn = sqlite3.connect(DB_PATH)
+    # timeout=30: wait out a tool call's short read transaction (or a second
+    # writer) instead of failing after the default 5 s
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.execute("PRAGMA journal_mode=WAL;")
     build_schema(conn)
 

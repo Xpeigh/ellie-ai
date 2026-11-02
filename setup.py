@@ -163,12 +163,20 @@ def setup_coriolis():
 
 def setup_ship_modules():
     _heading("Ship & module stats (loadout calculator)")
-    existing = _table_count("ship_stats")
-    if existing:
-        print(f"ship_stats already has {existing} rows.")
+    tables = ("ship_stats", "module_stats", "module_blueprints")
+    counts = {t: _table_count(t) for t in tables}
+    empty = [t for t, n in counts.items() if not n]
+    if not empty:
+        print("ship_stats, module_stats and module_blueprints already have "
+              + ", ".join(f"{counts[t]}" for t in tables) + " rows.")
         if not _ask_yes_no("Re-ingest anyway?", default=False):
             print("Skipped.")
             return True
+    elif len(empty) < len(tables):
+        # some of the three are filled and some aren't: a half-finished ingest,
+        # not something to skip -- redo it without asking
+        verb = "is" if len(empty) == 1 else "are"
+        print(f"{', '.join(empty)} {verb} empty -- re-ingesting ship & module stats.")
 
     if not CORIOLIS_MARKER.exists():
         print("Coriolis data isn't cloned yet -- run the Coriolis step above first.")
@@ -181,12 +189,16 @@ def setup_ship_modules():
         print(f"Missing a required package ({e}). Install everything this needs with: pip install -r requirements.txt")
         return False
 
+    try:
+        ism.require_inputs(CORIOLIS_DIR)      # before the database is touched
+    except FileNotFoundError as e:
+        print(f"{e}\nRe-run the Coriolis step above (delete the coriolis-data folder if it is half cloned).")
+        return False
     conn = sqlite3.connect(DB_PATH)
-    ism.build_schema(conn)
-    ship_count = ism.build_ships(conn, str(CORIOLIS_DIR))
-    module_count = ism.build_modules(conn, str(CORIOLIS_DIR))
-    blueprint_count = ism.build_module_blueprints(conn, str(CORIOLIS_DIR))
-    conn.close()
+    try:
+        ship_count, module_count, blueprint_count = ism.ingest_all(conn, str(CORIOLIS_DIR))
+    finally:
+        conn.close()
     print(f"ship_stats: {ship_count} rows")
     print(f"module_stats: {module_count} rows")
     print(f"module_blueprints: {blueprint_count} rows")
