@@ -11,7 +11,7 @@ import query_functions as qf
 import journal_watcher as jw
 import ingest_ship_modules as ism
 import ingest_coriolis as ic
-from loadout_calc import compute_current_jump_range, compute_jump_range
+from loadout_calc import apply_blueprint_delta, compute_current_jump_range, compute_jump_range
 
 REPO = Path(__file__).resolve().parent.parent / "coriolis-data"
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
@@ -121,15 +121,17 @@ def test_swap_with_blueprint_applies_deterministic_delta(tmp_path):
 
 
 def test_swap_nonexistent_class_is_not_found(tmp_path):
-    """Renamed from ..._is_incompatible_not_wrong_number: class 9 doesn't
-    exist as a module for ANY ship, so this is a "no such module" case
-    (found: False), not the class-too-big-for-this-slot case (compatible:
-    False), which test_swap_class_too_big_for_slot_returns_compatible_false
-    covers with a class that DOES exist."""
+    """Renamed from ..._is_incompatible_not_wrong_number: no class 1 frame shift
+    drive exists for ANY ship (the smallest is class 2), so this is a "no such
+    module" case (found: False) that reaches the candidate lookup, not the
+    class-too-big-for-this-slot case (compatible: False), which
+    test_swap_class_too_big_for_slot_returns_compatible_false covers with a class
+    that DOES exist. (It used class 9, which is rejected as out of range 0-8
+    before any lookup, so it never tested this.)"""
     _db(tmp_path)
-    # explorer_nx's FSD slot is class 8 -- class 9 doesn't exist for any ship.
-    result = qf.simulate_module_swap(module_group="frame shift drive", module_class=9, module_rating="A")
+    result = qf.simulate_module_swap(module_group="frame shift drive", module_class=1, module_rating="A")
     assert result["found"] is False
+    assert result["reason"] == "no frame shift drive of class 1 rating A exists"
 
 
 def test_swap_class_too_big_for_slot_returns_compatible_false(tmp_path):
@@ -1610,3 +1612,185 @@ def test_summary_qualifiers_come_in_a_fixed_order_before_the_unavailable_note_an
     )
     result["caveat"] = "already ends with a period."
     assert " already ends with a period. Current-load" in qf._swap_summary(result)
+
+
+# ---------------------------------------------------------------------------
+# Task 10a X9: behaviours the final review found unpinned
+# ---------------------------------------------------------------------------
+
+def _module_stat(path, symbol, column):
+    conn = sqlite3.connect(path)
+    try:
+        return conn.execute(f"SELECT {column} FROM module_stats WHERE symbol = ?", (symbol,)).fetchone()[0]
+    finally:
+        conn.close()
+
+
+def _update_module(path, slot, **columns):
+    conn = sqlite3.connect(path)
+    for column, value in columns.items():
+        conn.execute(f"UPDATE current_loadout_modules SET {column} = ? WHERE slot = ?", (value, slot))
+    conn.commit()
+    conn.close()
+
+
+# --- power margin inputs --------------------------------------------------------
+
+def test_switching_a_module_off_frees_its_power_in_the_margin(tmp_path):
+    path = _type9_now(tmp_path, fuel=10.0, cargo=100)
+    baseline = _ls_swap()["new_power_margin"]
+    assert baseline == 5.72
+    shield_draw = _module_stat(path, "int_shieldgenerator_size6_class1", "power")      # 1.86 MW
+    _update_module(path, "Slot03_Size6", is_on=0)
+    margin = _ls_swap()["new_power_margin"]
+    assert margin > 5.72 + 1.0
+    assert margin == pytest.approx(5.72 + shield_draw, abs=0.011)
+
+
+def test_an_engineered_power_plant_output_is_what_the_margin_uses(tmp_path):
+    """The journal's own PowerCapacity (30 MW) replaces the base pgen (16.8)."""
+    path = _type9_now(tmp_path, fuel=10.0, cargo=100)
+    base_output = json.loads(_module_stat(path, "int_powerplant_size6_class1", "extra_json"))["pgen"]
+    assert base_output == 16.8
+    _update_module(path, "PowerPlant", engineering_modifiers_json=json.dumps([{"Label": "PowerCapacity", "Value": 30.0}]))
+    assert _ls_swap()["new_power_margin"] == pytest.approx(5.72 + (30.0 - 16.8), abs=0.011)
+
+
+def test_an_engineered_power_draw_replaces_the_base_draw_in_the_margin(tmp_path):
+    """Slot03_Size6's journal PowerDraw is 0.0, so the margin gains its whole base draw."""
+    path = _type9_now(tmp_path, fuel=10.0, cargo=100)
+    shield_draw = _module_stat(path, "int_shieldgenerator_size6_class1", "power")
+    _update_module(path, "Slot03_Size6", engineering_modifiers_json=json.dumps([{"Label": "PowerDraw", "Value": 0.0}]))
+    assert _ls_swap()["new_power_margin"] == pytest.approx(5.72 + shield_draw, abs=0.011)
+
+
+# --- refusals ---------------------------------------------------------------------
+
+def test_a_module_class_that_does_not_exist_is_refused_at_the_candidate_lookup(tmp_path):
+    _type9_now(tmp_path)
+    result = qf.simulate_module_swap("frame shift drive", 1, "A")
+    assert result["found"] is False
+    assert "exists" in result["reason"]
+    assert result["reason"] == "no frame shift drive of class 1 rating A exists"
+
+
+def test_a_variant_that_matches_nothing_is_named_in_the_refusal(tmp_path):
+    _type9_now(tmp_path)
+    result = qf.simulate_module_swap("frame shift drive", 1, "A", variant="no such drive")
+    assert result["found"] is False
+    assert "matching 'no such drive'" in result["reason"]
+
+
+def test_an_unrecognised_module_already_in_the_target_slot_is_refused_by_name(tmp_path):
+    path = _type9_now(tmp_path)
+    _insert_module(path, "Slot08_Size4", "notarealmodule")
+    result = qf.simulate_module_swap("cargo rack", 4, "E", variant="int_cargorack_size4_class1", slot="Slot08_Size4")
+    assert result["found"] is False
+    assert "notarealmodule" in result["reason"]
+    assert result["reason"] == (
+        "the module currently in Slot08_Size4 (notarealmodule) isn't in Ellie's module data, "
+        "so the change can't be computed")
+
+
+# --- guardian booster and optimal mass ---------------------------------------------
+
+def test_swapping_a_guardian_booster_in_adds_its_bonus_to_the_new_max_range(tmp_path):
+    """Explorer NX (real engineered drive: optmass 7333.768066, maxfuel 6.8,
+    fuelmul 0.011, fuelpower 2.5025) with a class 2 Guardian booster (1.3 t,
+    +6 ly) into the unfitted Slot08_Size4. Expected from loadout_calc."""
+    path = _db(tmp_path)
+    booster_mass = _module_stat(path, "int_guardianfsdbooster_size2", "mass")
+    jumpboost = json.loads(_module_stat(path, "int_guardianfsdbooster_size2", "extra_json"))["jumpboost"]
+    assert (booster_mass, jumpboost) == (1.3, 6)
+    result = qf.simulate_module_swap("guardian fsd booster", 2, "H", slot="Slot08_Size4")
+    assert result["found"] is True and result["compatible"] is True
+    new_unladen = 1286.300049 + booster_mass
+    assert result["new_unladen_mass"] == round(new_unladen, 2)
+    expected = compute_jump_range(new_unladen, 7333.768066, 6.8, 0.011, 2.5025, booster_bonus=jumpboost)
+    assert result["new_jump_range_max"] == round(expected, 2)
+    assert result["new_jump_range_max"] - round(compute_jump_range(new_unladen, 7333.768066, 6.8, 0.011, 2.5025), 2) == pytest.approx(6, abs=0.011)
+
+
+def _fsd_7e_stats(path):
+    extra = json.loads(_module_stat(path, "int_hyperdrive_size7_class1", "extra_json"))
+    return _module_stat(path, "int_hyperdrive_size7_class1", "mass"), extra
+
+
+@pytest.mark.parametrize("grade, optmass_pct", [(1, [0, 0.15]), (5, [0.45, 0.55])])
+def test_increased_range_new_max_range_is_the_min_max_of_the_optimal_mass_blueprint(tmp_path, grade, optmass_pct):
+    """The stock 7E drive with an Increased range blueprint on the Explorer NX
+    (whose real engineered 208 t drive it replaces). Mass is deterministic at
+    every grade; optimal mass is a roll range, so the jump range is {min, max}.
+    Grade 1's optmass range is [0, 0.15]; the [0.45, 0.55] range is grade 5's."""
+    path = _db(tmp_path)
+    mass, extra = _fsd_7e_stats(path)
+    mass_pct = {1: [0.1, 0.1], 5: [0.3, 0.3]}[grade]
+    new_mass = apply_blueprint_delta(mass, mass_pct)[0]
+    new_unladen = 1286.300049 - 208.0 + new_mass
+    optmass_lo, optmass_hi = apply_blueprint_delta(extra["optmass"], optmass_pct)
+    args = (extra["maxfuel"], extra["fuelmul"], extra["fuelpower"])
+    result = qf.simulate_module_swap(
+        module_group="frame shift drive", module_class=7, module_rating="E",
+        blueprint_name="Increased range", grade=grade, variant="int_hyperdrive_size7_class1",
+    )
+    assert result["new_jump_range_max"] == {
+        "min": round(compute_jump_range(new_unladen, optmass_lo, *args), 2),
+        "max": round(compute_jump_range(new_unladen, optmass_hi, *args), 2),
+    }
+    assert result["new_jump_range_max"]["min"] < result["new_jump_range_max"]["max"]
+
+
+# --- slot kind and size rules ---------------------------------------------------------
+
+def test_a_shield_generator_does_not_fit_the_life_support_slot(tmp_path):
+    _type9_now(tmp_path)
+    result = qf.simulate_module_swap("shield generator", 4, "A", slot="LifeSupport")
+    assert result["found"] is True and result["compatible"] is False
+    assert "only fits an internal slot" in result["reason"]
+
+
+def test_a_fuel_tank_with_no_slot_goes_in_the_standard_fuel_tank_slot(tmp_path):
+    _type9_now(tmp_path)
+    result = qf.simulate_module_swap("fuel tank", 5, "C")
+    assert result["found"] is True and result["compatible"] is True
+    assert result["slot"] == "FuelTank"
+
+
+def test_an_oversize_rack_already_fitted_in_a_small_slot_sets_that_slots_size(tmp_path):
+    """The Keelback-style exception: Slot05_Size4 really holds a class 5 rack,
+    so a class 5 rack fits it again."""
+    path = _type9_now(tmp_path)
+    _update_module(path, "Slot05_Size4", item="int_cargorack_size5_class1")
+    result = qf.simulate_module_swap("cargo rack", 5, "E", variant="int_cargorack_size5_class1", slot="Slot05_Size4")
+    assert result["found"] is True and result["compatible"] is True
+    assert result["removed"] == {"item": "int_cargorack_size5_class1"}
+
+
+def test_an_unfitted_internal_slot_is_accepted_with_a_caveat_if_the_ship_could_have_it(tmp_path):
+    _type9_now(tmp_path)
+    result = qf.simulate_module_swap("cargo rack", 4, "E", variant="int_cargorack_size4_class1", slot="Slot09_Size8")
+    assert result["found"] is True and result["compatible"] is True
+    assert result["caveat"] == (
+        "Slot09_Size8 isn't fitted in your current loadout, so Ellie can't confirm it's an empty slot on your ship "
+        "-- these numbers assume it is")
+
+
+def test_an_internal_slot_bigger_than_any_the_ship_has_is_rejected(tmp_path):
+    _type9_now(tmp_path)
+    result = qf.simulate_module_swap("cargo rack", 4, "E", variant="int_cargorack_size4_class1", slot="Slot09_Size9")
+    assert result["found"] is True and result["compatible"] is False
+    assert result["reason"] == "your Type-9 Heavy has no size-9 internal slot"
+
+
+def test_explorer_nx_life_support_class_6_is_too_big_for_its_class_5_slot(tmp_path):
+    _db(tmp_path)
+    result = qf.simulate_module_swap("life support", 6, "E")
+    assert result["found"] is True and result["compatible"] is False
+    assert "max class 5" in result["reason"]
+
+
+def test_a_beam_laser_does_not_fit_a_utility_mount(tmp_path):
+    _type9_now(tmp_path)
+    result = qf.simulate_module_swap("beam laser", 1, "E", variant="hpt_beamlaser_fixed_small", slot="TinyHardpoint2")
+    assert result["found"] is True and result["compatible"] is False
+    assert "only fits a hardpoint mount" in result["reason"]

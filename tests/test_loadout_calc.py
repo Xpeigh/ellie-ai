@@ -111,3 +111,9 @@ def test_current_jump_range_adds_booster_bonus():
     plain = compute_current_jump_range(TYPE9_UNLADEN, 10.0, 100, **TYPE9_FSD)
     boosted = compute_current_jump_range(TYPE9_UNLADEN, 10.0, 100, **TYPE9_FSD, booster_bonus=6)
     assert boosted - plain == pytest.approx(6, abs=1e-9)
+
+
+def test_current_jump_range_of_an_empty_tank_is_zero_even_with_a_booster():
+    # nothing to burn means no jump at all: the flat booster bonus must not turn 0 into 6
+    assert compute_current_jump_range(TYPE9_UNLADEN, 0.0, 0, **TYPE9_FSD, booster_bonus=6) == 0.0
+    assert compute_current_jump_range(TYPE9_UNLADEN, -1.0, 0, **TYPE9_FSD, booster_bonus=6) == 0.0

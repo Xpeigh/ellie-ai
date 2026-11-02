@@ -129,14 +129,18 @@ def test_rerun_is_safe_and_idempotent(tmp_path):
     ism.build_modules(conn, str(REPO))
     conn.commit()
     first_ships = conn.execute("SELECT COUNT(*) FROM ship_stats").fetchone()[0]
+    first_modules = conn.execute("SELECT COUNT(*) FROM module_stats").fetchone()[0]
+    assert first_ships > 0 and first_modules > 0    # equal-and-empty would pass the checks below
 
     ism.build_schema(conn)  # simulates re-running the whole script
     ism.build_ships(conn, str(REPO))
     ism.build_modules(conn, str(REPO))
     conn.commit()
     second_ships = conn.execute("SELECT COUNT(*) FROM ship_stats").fetchone()[0]
+    second_modules = conn.execute("SELECT COUNT(*) FROM module_stats").fetchone()[0]
 
     assert first_ships == second_ships
+    assert first_modules == second_modules
     conn.close()
 
 

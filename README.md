@@ -79,6 +79,17 @@ python ellie_chat.py
 
 The ingest scripts are safe to re-run at any time. They only touch their own tables.
 
+## Running the tests
+
+```bash
+pip install -r requirements.txt
+python setup.py          # fetches coriolis-data, which the ship and module tests read
+python -m pytest tests
+```
+
+The tests use temporary databases and never touch `elite-dangerous.db`. The ones that need the
+Coriolis data skip, saying so, until `python setup.py` has fetched it; the rest run without it.
+
 ## Limitations
 
 - `distance_to_system` only knows populated systems for the destination (the EDSM dump excludes
