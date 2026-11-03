@@ -632,7 +632,7 @@ def test_malformed_engineering_modifiers_on_the_drive_read_as_no_engineering(tmp
     assert result["state_note"] is None
     fsd = next(m for m in result["modules"] if m["slot"] == "FrameShiftDrive")
     if with_blueprint:
-        assert fsd["engineering"]["modifiers"] == []
+        assert fsd["engineering"] == "FSD_LongRange g5"       # no Coriolis tables here: the journal's own name
     else:
         assert "engineering" not in fsd
 
@@ -661,3 +661,209 @@ def test_no_base_optimal_mass_and_no_jump_time_one_means_no_warning_not_a_crash(
     assert result["jump_range_now"] == 13.0       # computed with the engineered 1488
     assert "warning" not in result
     assert "may be inaccurate" not in result["summary"]
+
+
+# ---------------------------------------------------------------------------
+# Task 10b B2: get_ship_info returns labelled facts and a summary
+# ---------------------------------------------------------------------------
+
+CORE_LABELS = ("power_plant", "thrusters", "frame_shift_drive", "life_support", "power_distributor", "sensors", "fuel_tank")
+ANACONDA_SUMMARY = (
+    "Anaconda (Faulcon DeLacy): hull mass 400.0 t; hardpoints: 2 small, 2 medium, 3 large, 1 huge; "
+    "8 utility mounts; 14 internal slots; core slots: power plant 8, thrusters 7, frame shift drive 6, "
+    "life support 5, power distributor 8, sensors 8, fuel tank 5."
+)
+
+
+def _ship_stats_row(path, name):
+    conn = sqlite3.connect(path)
+    try:
+        return conn.execute("SELECT name, manufacturer, hull_mass, slots_json FROM ship_stats WHERE name = ?", (name,)).fetchone()
+    finally:
+        conn.close()
+
+
+def test_get_ship_info_is_labelled_and_matches_the_ship_data(tmp_path):
+    """Expected values are computed from ship_stats' own arrays here, then the
+    whole result (and the exact summary string) is asserted."""
+    path = _db(tmp_path)
+    name, manufacturer, hull_mass, slots_json = _ship_stats_row(path, "Anaconda")
+    slots = json.loads(slots_json)
+    classes = [e if isinstance(e, int) else e["class"] for e in slots["hardpoints"]]
+    internal_ints = [e for e in slots["internal"] if isinstance(e, int)]
+    reserved = [{"name": e["name"], "class": e["class"]} for e in slots["internal"] if isinstance(e, dict)]
+    expected = {
+        "found": True, "name": name, "manufacturer": manufacturer, "hull_mass": hull_mass,
+        "core_slots": dict(zip(CORE_LABELS, slots["standard"])),
+        "hardpoints": {"small": classes.count(1), "medium": classes.count(2), "large": classes.count(3), "huge": classes.count(4)},
+        "utility_mounts": classes.count(0),
+        "internal_slots": {
+            "total": len(slots["internal"]),
+            "sizes": {str(c): internal_ints.count(c) for c in sorted(set(internal_ints), reverse=True)},
+            "reserved": reserved,
+        },
+        "summary": ANACONDA_SUMMARY,
+    }
+    result = qf.get_ship_info("Anaconda")
+    assert result == expected
+    # and the pinned values behind that summary, spelled out
+    assert result["core_slots"] == {"power_plant": 8, "thrusters": 7, "frame_shift_drive": 6, "life_support": 5,
+                                    "power_distributor": 8, "sensors": 8, "fuel_tank": 5}
+    assert result["hardpoints"] == {"small": 2, "medium": 2, "large": 3, "huge": 1}
+    assert result["utility_mounts"] == 8
+    assert result["internal_slots"]["sizes"] == {"7": 1, "6": 3, "5": 3, "4": 3, "2": 1, "1": 1}
+    assert result["internal_slots"]["reserved"] == [{"name": "Military", "class": 5}, {"name": "PlanetaryApproachSuite", "class": 1}]
+    assert "slots" not in result and "base stats" not in json.dumps(result).lower()
+
+
+def test_get_ship_info_for_a_ship_without_reserved_slots_or_with_odd_layouts(tmp_path):
+    path = _db(tmp_path)
+    _, _, _, slots_json = _ship_stats_row(path, "Type-9 Heavy")
+    slots = json.loads(slots_json)
+    result = qf.get_ship_info("Type-9 Heavy")
+    assert result["core_slots"]["fuel_tank"] == slots["standard"][6] == 6
+    assert result["utility_mounts"] == 4
+    assert result["hardpoints"] == {"small": 2, "medium": 3, "large": 0, "huge": 0}
+    assert result["internal_slots"]["total"] == 12
+    assert result["internal_slots"]["reserved"] == [{"name": "PlanetaryApproachSuite", "class": 1}]
+    assert result["summary"].startswith("Type-9 Heavy (")
+
+
+@pytest.mark.parametrize("typed", ["anaconda", "ANACONDA", "  Anaconda ", "a-n-a-c-o-n-d-a", "Ana"])
+def test_ship_names_match_loosely(tmp_path, typed):
+    _db(tmp_path)
+    assert qf.get_ship_info(typed) == qf.get_ship_info("Anaconda")
+
+
+@pytest.mark.parametrize("typed", ["Type-9", "type9", "Type 9 Heavy", "type-9-heavy", "TYPE9HEAVY"])
+def test_type_9_finds_type_9_heavy(tmp_path, typed):
+    _db(tmp_path)
+    assert qf.get_ship_info(typed)["name"] == "Type-9 Heavy"
+
+
+def test_an_exact_name_beats_a_longer_name_it_is_a_prefix_of(tmp_path):
+    """Python is a prefix of Python Mk II, but the exact match wins."""
+    _db(tmp_path)
+    assert qf.get_ship_info("Python")["name"] == "Python"
+    assert qf.get_ship_info("python mk ii")["name"] == "Python Mk II"
+
+
+@pytest.mark.parametrize("typed", ["Type", "Cobra", "Imperial", "Federal", "Alliance"])
+def test_an_ambiguous_prefix_is_not_a_match(tmp_path, typed):
+    _db(tmp_path)
+    result = qf.get_ship_info(typed)
+    assert result["found"] is False
+    assert result["reason"] == f"Ellie has no ship called '{typed}' in her ship data."
+
+
+def test_an_unknown_ship_gets_the_reason_and_close_names_in_their_original_spelling(tmp_path):
+    _db(tmp_path)
+    result = qf.get_ship_info("Anacondaa")
+    assert result["found"] is False
+    assert result["reason"] == "Ellie has no ship called 'Anacondaa' in her ship data."
+    assert result["did_you_mean"][0] == "Anaconda"
+    assert 1 <= len(result["did_you_mean"]) <= 3
+    other = qf.get_ship_info("Type-9 Heavyy")
+    assert other["did_you_mean"][0] == "Type-9 Heavy"          # original spelling, not "type9heavy"
+
+
+def test_did_you_mean_is_left_out_when_nothing_is_close(tmp_path):
+    _db(tmp_path)
+    assert qf.get_ship_info("Zzzzzzzz") == {"found": False, "reason": "Ellie has no ship called 'Zzzzzzzz' in her ship data."}
+    assert qf.get_ship_info("---") == {"found": False, "reason": "Ellie has no ship called '---' in her ship data."}
+    assert qf.get_ship_info("")["found"] is False
+
+
+# ---------------------------------------------------------------------------
+# Task 10b B3: a readable, compact module list
+# ---------------------------------------------------------------------------
+
+def _modules_by_slot(result):
+    return {m["slot"]: m for m in result["modules"]}
+
+
+CORE_ENTRY_KEYS = ["slot", "module", "class", "rating", "on", "health"]
+
+
+def test_modules_are_decoded_from_the_symbol(tmp_path):
+    _type9_now(tmp_path)
+    modules = _modules_by_slot(qf.get_current_loadout())
+    assert modules["FrameShiftDrive"] == {
+        "slot": "FrameShiftDrive", "module": "FSD", "class": 6, "rating": "E", "on": True, "health": 1.0}
+    assert modules["Slot03_Size6"] == {
+        "slot": "Slot03_Size6", "module": "Shield Generator", "class": 6, "rating": "E", "on": True, "health": 1.0}
+    assert list(modules["FrameShiftDrive"]) == CORE_ENTRY_KEYS
+    for entry in modules.values():
+        assert "item" not in entry and "modifiers" not in entry and "engineering" not in entry
+
+
+def test_a_weapon_without_a_display_name_is_named_from_its_group_and_mount(tmp_path):
+    _type9_now(tmp_path)
+    assert _modules_by_slot(qf.get_current_loadout())["MediumHardpoint2"] == {
+        "slot": "MediumHardpoint2", "module": "Pulse Laser (fixed)", "class": 1, "rating": "F", "on": True, "health": 1.0}
+
+
+def test_cosmetic_and_zero_draw_slots_are_not_listed(tmp_path):
+    _type9_now(tmp_path)
+    slots = set(_modules_by_slot(qf.get_current_loadout()))
+    assert {"Armour", "ShipCockpit", "VesselVoice"}.isdisjoint(slots)         # armour, cockpit, voice pack
+    assert {"FrameShiftDrive", "PowerPlant", "CargoHatch", "Slot12_Size1", "PlanetaryApproachSuite"} <= slots
+    assert len(slots) == 18
+
+
+def test_other_cosmetic_kinds_are_dropped_too(tmp_path):
+    path = _type9_now(tmp_path)
+    conn = sqlite3.connect(path)
+    for slot, item in (("PaintJob", "paintjob_type9_vintage_white"), ("Decal1", "decal_explorer_elite"),
+                       ("ShipKitBumper", "type9_shipkit1_bumper1"), ("Nameplate", "nameplate_explorer01_white"),
+                       ("Bobble01", "bobble_davidbowie_01"), ("Lights", "string_lights_coloured")):
+        conn.execute("INSERT INTO current_loadout_modules VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                     (slot, item, 1, 1, 1.0, None, None, None, None, None, None, "t"))
+    conn.commit()
+    conn.close()
+    assert len(qf.get_current_loadout()["modules"]) == 18
+
+
+def test_a_symbol_ellie_does_not_know_is_listed_by_its_raw_name_without_class_or_rating(tmp_path):
+    path = _type9_now(tmp_path)
+    assert _modules_by_slot(qf.get_current_loadout())["CargoHatch"] == {
+        "slot": "CargoHatch", "module": "modularcargobaydoor", "on": True, "health": 1.0}
+    conn = sqlite3.connect(path)
+    conn.execute("UPDATE current_loadout_modules SET item = 'int_brandnew_size3_class1' WHERE slot = 'Slot07_Size3'")
+    conn.commit()
+    conn.close()
+    assert _modules_by_slot(qf.get_current_loadout())["Slot07_Size3"] == {
+        "slot": "Slot07_Size3", "module": "int_brandnew_size3_class1", "on": True, "health": 1.0}
+
+
+def _engineer(path, slot, blueprint, level, experimental=None):
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "UPDATE current_loadout_modules SET engineering_blueprint = ?, engineering_level = ?, "
+        "engineering_experimental = ?, engineering_modifiers_json = '[{\"Label\": \"Mass\", \"Value\": 1.0}]' WHERE slot = ?",
+        (blueprint, level, experimental, slot))
+    conn.commit()
+    conn.close()
+
+
+def test_engineering_without_blueprint_tables_falls_back_to_the_journal_names(tmp_path):
+    """This test database has no coriolis tables, so no display names exist."""
+    path = _type9_now(tmp_path)
+    _engineer(path, "FrameShiftDrive", "FSD_LongRange", 5, "special_fsd_heavy")
+    entry = _modules_by_slot(qf.get_current_loadout())["FrameShiftDrive"]
+    assert entry["engineering"] == "FSD_LongRange g5, special_fsd_heavy"
+    assert list(entry) == CORE_ENTRY_KEYS + ["engineering"]
+    _engineer(path, "FrameShiftDrive", "FSD_LongRange", 3)
+    assert _modules_by_slot(qf.get_current_loadout())["FrameShiftDrive"]["engineering"] == "FSD_LongRange g3"
+
+
+def test_the_module_list_fits_the_size_target(tmp_path):
+    _db(tmp_path)                                   # the Explorer NX fixture
+    assert len(json.dumps(qf.get_current_loadout())) <= 2600
+
+
+def test_a_full_real_loadout_stays_compact_too(tmp_path):
+    """The Type-9 fixture is a real 18-module Loadout."""
+    _type9_now(tmp_path)
+    size = len(json.dumps(qf.get_current_loadout()))
+    assert size <= 2600, size

@@ -1495,7 +1495,7 @@ def _booster_swap(slot):
 def test_other_spellings_of_an_occupied_utility_slot_find_the_fitted_module(tmp_path, spelling):
     _type9_with_booster_in_tiny_1(tmp_path)
     canonical = _booster_swap("TinyHardpoint1")
-    assert canonical["removed"] == {"item": "hpt_shieldbooster_size0_class1"}
+    assert canonical["removed"] == {"item": "hpt_shieldbooster_size0_class1", "module": "Shield Booster", "class": 0, "rating": "E"}
     assert canonical["mass_change"] == 3.0 and canonical["power_change"] == 1.0
     assert _booster_swap(spelling) == canonical     # incl. slot == "TinyHardpoint1", the real name
 
@@ -1517,7 +1517,7 @@ def test_the_fitted_slots_own_name_wins_over_the_canonical_one(tmp_path):
     for spelling in ("Tiny Hardpoint 1", "tinyhardpoint1", "TINYHARDPOINT01"):
         result = _booster_swap(spelling)
         assert result["slot"] == "TinyHardpoint01"
-        assert result["removed"] == {"item": "hpt_shieldbooster_size0_class1"}
+        assert result["removed"] == {"item": "hpt_shieldbooster_size0_class1", "module": "Shield Booster", "class": 0, "rating": "E"}
 
 
 def test_hardpoint_number_zero_is_rejected_with_a_plain_reason(tmp_path):
@@ -1542,7 +1542,7 @@ def test_a_mining_hardpoint_is_only_matched_to_a_fitted_mining_slot(tmp_path):
     _insert_module(path, "SmallMiningHardpoint1", "hpt_beamlaser_fixed_small")
     fitted = qf.simulate_module_swap(module_group="beam laser", module_class=1, module_rating="E",
                                      variant="hpt_beamlaser_fixed_small", slot="SmallMiningHardpoint1")
-    assert fitted["removed"] == {"item": "hpt_beamlaser_fixed_small"}
+    assert fitted["removed"] == {"item": "hpt_beamlaser_fixed_small", "module": "Beam Laser (fixed)", "class": 1, "rating": "E"}
     for spelling in ("small mining hardpoint 01", "SMALLMININGHARDPOINT1"):
         again = qf.simulate_module_swap(module_group="beam laser", module_class=1, module_rating="E",
                                         variant="hpt_beamlaser_fixed_small", slot=spelling)
@@ -1763,7 +1763,7 @@ def test_an_oversize_rack_already_fitted_in_a_small_slot_sets_that_slots_size(tm
     _update_module(path, "Slot05_Size4", item="int_cargorack_size5_class1")
     result = qf.simulate_module_swap("cargo rack", 5, "E", variant="int_cargorack_size5_class1", slot="Slot05_Size4")
     assert result["found"] is True and result["compatible"] is True
-    assert result["removed"] == {"item": "int_cargorack_size5_class1"}
+    assert result["removed"] == {"item": "int_cargorack_size5_class1", "module": "Cargo Rack", "class": 5, "rating": "E"}
 
 
 def test_an_unfitted_internal_slot_is_accepted_with_a_caveat_if_the_ship_could_have_it(tmp_path):
@@ -1794,3 +1794,279 @@ def test_a_beam_laser_does_not_fit_a_utility_mount(tmp_path):
     result = qf.simulate_module_swap("beam laser", 1, "E", variant="hpt_beamlaser_fixed_small", slot="TinyHardpoint2")
     assert result["found"] is True and result["compatible"] is False
     assert "only fits a hardpoint mount" in result["reason"]
+
+
+# ---------------------------------------------------------------------------
+# Task 10b B3 (decoded `removed`), B4 (which slot?), B8 (thruster note), B9b
+# ---------------------------------------------------------------------------
+
+def _hardpoint_counts(path, ship_key):
+    conn = sqlite3.connect(path)
+    try:
+        slots = json.loads(conn.execute("SELECT slots_json FROM ship_stats WHERE ship_key = ?", (ship_key,)).fetchone()[0])
+    finally:
+        conn.close()
+    classes = [e if isinstance(e, int) else e["class"] for e in slots["hardpoints"]]
+    return {word: classes.count(c) for word, c in (("tiny", 0), ("small", 1), ("medium", 2), ("large", 3), ("huge", 4))}
+
+
+def _fitted(path):
+    conn = sqlite3.connect(path)
+    try:
+        return {row[0] for row in conn.execute("SELECT slot FROM current_loadout_modules")}
+    finally:
+        conn.close()
+
+
+def _free_names(path, ship_key, words):
+    """Hardpoint names of these size words that nothing is fitted in, expected
+    straight from the fixture's hardpoints minus its fitted slots."""
+    counts = _hardpoint_counts(path, ship_key)
+    fitted = _fitted(path)
+    return [f"{word.capitalize()}Hardpoint{i}" for word in words for i in range(1, counts[word] + 1)
+            if f"{word.capitalize()}Hardpoint{i}" not in fitted]
+
+
+# --- B3: `removed` is decoded -----------------------------------------------------------
+
+def test_removed_names_the_module_class_and_rating(tmp_path):
+    _type9_now(tmp_path)
+    removed = _fsd_swap_6a()["removed"]
+    assert removed == {"item": "int_hyperdrive_size6_class1", "module": "FSD", "class": 6, "rating": "E"}
+
+
+def test_removed_decodes_the_engineered_explorer_drive(tmp_path):
+    _db(tmp_path)
+    result = qf.simulate_module_swap("frame shift drive", 8, "A", variant="int_hyperdrive_overcharge_size8_class5")
+    assert result["removed"] == {
+        "item": "int_hyperdrive_overcharge_size8_class5_overchargebooster_mkii",
+        "module": "Frame Shift Drive Mk II (SCO)", "class": 8, "rating": "A"}
+
+
+def test_an_empty_slot_still_removes_nothing(tmp_path):
+    _type9_now(tmp_path)
+    assert qf.simulate_module_swap("shield generator", 4, "A", slot="Slot06_Size4")["removed"] == {"item": None}
+
+
+def test_the_loadout_decodes_the_engineered_explorer_drive(tmp_path):
+    """Display names come from the Coriolis tables: Increased range, Mass Manager."""
+    _db(tmp_path)
+    fsd = next(m for m in qf.get_current_loadout()["modules"] if m["slot"] == "FrameShiftDrive")
+    assert fsd == {
+        "slot": "FrameShiftDrive", "module": "Frame Shift Drive Mk II (SCO)", "class": 8, "rating": "A",
+        "on": True, "health": 1.0, "engineering": "Increased range g5, Mass Manager"}
+
+
+def test_engineering_names_fall_back_one_by_one_to_the_journal_names(tmp_path):
+    path = _db(tmp_path)
+    conn = sqlite3.connect(path)
+    conn.execute("UPDATE current_loadout_modules SET engineering_blueprint = 'Weird_Thing', engineering_level = 3, "
+                 "engineering_experimental = 'special_fsd_heavy' WHERE slot = 'FrameShiftDrive'")
+    conn.commit()
+    conn.close()
+    fsd = next(m for m in qf.get_current_loadout()["modules"] if m["slot"] == "FrameShiftDrive")
+    assert fsd["engineering"] == "Weird_Thing g3, Mass Manager"          # unknown blueprint, known experimental
+    conn = sqlite3.connect(path)
+    conn.execute("UPDATE current_loadout_modules SET engineering_blueprint = 'FSD_LongRange', engineering_experimental = 'special_not_real'")
+    conn.commit()
+    conn.close()
+    fsd = next(m for m in qf.get_current_loadout()["modules"] if m["slot"] == "FrameShiftDrive")
+    assert fsd["engineering"] == "Increased range g3, special_not_real"   # known blueprint, unknown experimental
+    conn = sqlite3.connect(path)
+    conn.execute("UPDATE current_loadout_modules SET engineering_experimental = NULL")
+    conn.commit()
+    conn.close()
+    fsd = next(m for m in qf.get_current_loadout()["modules"] if m["slot"] == "FrameShiftDrive")
+    assert fsd["engineering"] == "Increased range g3"
+
+
+# --- B4: "which slot?" replies list real slot names ------------------------------------------
+
+def test_a_utility_module_with_no_slot_lists_the_free_mounts_of_the_type_9(tmp_path):
+    path = _type9_now(tmp_path)
+    free = _free_names(path, "type_9_heavy", ["tiny"])
+    assert free == ["TinyHardpoint1", "TinyHardpoint2", "TinyHardpoint3", "TinyHardpoint4"]
+    result = qf.simulate_module_swap("heat sink launcher", 0, "I")
+    assert result == {
+        "found": False,
+        "reason": f"Which utility mount? Your Type-9 Heavy has {len(free)} utility mounts; free right now: "
+                  f"{', '.join(free)}. Name one with slot.",
+    }
+    assert result["reason"] == (
+        "Which utility mount? Your Type-9 Heavy has 4 utility mounts; free right now: "
+        "TinyHardpoint1, TinyHardpoint2, TinyHardpoint3, TinyHardpoint4. Name one with slot.")
+
+
+def test_the_utility_reply_leaves_out_mounts_that_are_in_use(tmp_path):
+    path = _type9_now(tmp_path)
+    _insert_module(path, "TinyHardpoint1", "hpt_shieldbooster_size0_class1")
+    _insert_module(path, "TinyHardpoint3", "hpt_chafflauncher_tiny")
+    free = _free_names(path, "type_9_heavy", ["tiny"])
+    assert free == ["TinyHardpoint2", "TinyHardpoint4"]
+    reason = qf.simulate_module_swap("heat sink launcher", 0, "I")["reason"]
+    assert reason == "Which utility mount? Your Type-9 Heavy has 4 utility mounts; free right now: TinyHardpoint2, TinyHardpoint4. Name one with slot."
+
+
+def test_a_utility_reply_on_the_explorer_nx(tmp_path):
+    path = _db(tmp_path)
+    free = _free_names(path, "explorer_nx", ["tiny"])
+    assert len(free) == 6
+    assert qf.simulate_module_swap("heat sink launcher", 0, "I")["reason"] == (
+        f"Which utility mount? Your Caspian Explorer has 6 utility mounts; free right now: {', '.join(free)}. Name one with slot.")
+
+
+def test_every_utility_mount_in_use_says_so_and_names_the_fitted_ones(tmp_path):
+    path = _type9_now(tmp_path)
+    for i in (4, 2, 1, 3):
+        _insert_module(path, f"TinyHardpoint{i}", "hpt_chafflauncher_tiny")
+    reason = qf.simulate_module_swap("heat sink launcher", 0, "I")["reason"]
+    assert reason == (
+        "Your Type-9 Heavy has 4 utility mounts and all of them are in use; to replace one, name it with slot: "
+        "TinyHardpoint1, TinyHardpoint2, TinyHardpoint3, TinyHardpoint4.")
+
+
+def test_a_weapon_with_no_slot_lists_free_hardpoints_of_every_size_that_can_hold_it(tmp_path):
+    """Type-9: 2 small, 3 medium, none larger; MediumHardpoint2 is fitted. A
+    class 2 weapon only fits the medium ones."""
+    path = _type9_now(tmp_path)
+    free = _free_names(path, "type_9_heavy", ["medium"])
+    assert free == ["MediumHardpoint1", "MediumHardpoint3"]
+    assert qf.simulate_module_swap("cannon", 2, "D")["reason"] == (
+        "Which hardpoint? Your Type-9 Heavy has 3 hardpoints that fit a class 2 weapon; free right now: "
+        "MediumHardpoint1, MediumHardpoint3. Name one with slot.")
+    # a class 1 weapon also fits the small ones
+    small_and_medium = _free_names(path, "type_9_heavy", ["small", "medium"])
+    assert qf.simulate_module_swap("beam laser", 1, "E", variant="hpt_beamlaser_fixed_small")["reason"] == (
+        f"Which hardpoint? Your Type-9 Heavy has 5 hardpoints that fit a class 1 weapon; free right now: "
+        f"{', '.join(small_and_medium)}. Name one with slot.")
+    assert small_and_medium == ["SmallHardpoint1", "SmallHardpoint2", "MediumHardpoint1", "MediumHardpoint3"]
+
+
+def test_a_weapon_with_every_fitting_hardpoint_in_use(tmp_path):
+    path = _type9_now(tmp_path)
+    for slot in ("MediumHardpoint1", "MediumHardpoint3"):
+        _insert_module(path, slot, "hpt_pulselaser_fixed_small")
+    assert qf.simulate_module_swap("cannon", 2, "D")["reason"] == (
+        "Your Type-9 Heavy has 3 hardpoints that fit a class 2 weapon and all of them are in use; "
+        "to replace one, name it with slot: MediumHardpoint1, MediumHardpoint2, MediumHardpoint3.")
+
+
+def test_a_weapon_too_big_for_every_hardpoint_the_ship_has(tmp_path):
+    _type9_now(tmp_path)
+    assert qf.simulate_module_swap("cannon", 4, "B")["reason"] == "Your Type-9 Heavy has no hardpoint that fits a class 4 weapon."
+
+
+def test_an_internal_module_with_nothing_of_its_kind_fitted_lists_fitted_internal_slots(tmp_path):
+    _type9_now(tmp_path)
+    reason = qf.simulate_module_swap("fuel scoop", 3, "E")["reason"]
+    assert reason == (
+        "Which internal slot? Name one with slot, for example one of your fitted internal slots: "
+        "Slot00_Size8 (Cargo Rack), Slot01_Size8 (Cargo Rack), Slot02_Size7 (Cargo Rack), "
+        "Slot03_Size6 (Shield Generator), Slot04_Size5 (Cargo Rack), Slot05_Size4 (Cargo Rack). "
+        "Ellie cannot see empty internal slots in the journal.")
+
+
+def test_the_internal_reply_names_at_most_six_slots(tmp_path):
+    _type9_now(tmp_path)
+    reason = qf.simulate_module_swap("fuel scoop", 3, "E")["reason"]
+    assert reason.count("Slot") == 6 and "Slot07_Size3" not in reason
+
+
+def test_two_fitted_modules_of_the_same_kind_list_their_slots(tmp_path):
+    """Not a new reply, but it used to name no slots either."""
+    _type9_now(tmp_path)
+    reason = qf.simulate_module_swap("cargo rack", 5, "E", variant="int_cargorack_size5_class1")["reason"]
+    assert reason.startswith("ship has 6 slots of that type fitted -- specify which slot: ")
+    assert "Slot00_Size8" in reason and "Slot07_Size3" in reason
+
+
+def test_a_named_slot_still_works_after_the_reply(tmp_path):
+    _type9_now(tmp_path)
+    result = qf.simulate_module_swap("heat sink launcher", 0, "I", slot="TinyHardpoint3")
+    assert result["found"] is True and result["slot"] == "TinyHardpoint3"
+
+
+@pytest.mark.parametrize("junk", ["None", "none", "NONE", "null", "undefined", "", "  ", " None "])
+def test_junk_strings_for_the_optional_arguments_mean_not_given(tmp_path, junk):
+    """llama3.2 passed slot="None". A real slot, variant or blueprint can't be called that."""
+    _type9_now(tmp_path)
+    plain = _ls_swap()
+    assert qf.simulate_module_swap("life support", 5, "D", slot=junk) == plain
+    assert qf.simulate_module_swap("life support", 5, "D", variant=junk) == plain
+    assert qf.simulate_module_swap("life support", 5, "D", blueprint_name=junk, grade=3) == plain
+
+
+def test_junk_slot_on_a_utility_module_gets_the_which_mount_reply(tmp_path):
+    _type9_now(tmp_path)
+    assert qf.simulate_module_swap("heat sink launcher", 0, "I", slot="None")["reason"].startswith("Which utility mount?")
+
+
+# --- B8: thrusters can be rated below the loaded ship ------------------------------------------------
+
+def test_a_thruster_rated_below_the_loaded_mass_gets_a_note(tmp_path):
+    """Type-9, class 5 thrusters (maxmass 840): the ship loaded is 1122 - 80 + 20
+    + 64 t of fuel + 348 t of cargo = 1,474 t."""
+    path = _type9_now(tmp_path)
+    maxmass = json.loads(_module_stat(path, "int_engine_size5_class1", "extra_json"))["maxmass"]
+    new_mass = _module_stat(path, "int_engine_size5_class1", "mass")
+    old_mass = _module_stat(path, "int_engine_size7_class1", "mass")
+    full = 1122.0 - old_mass + new_mass + 64.0 + 348.0
+    assert maxmass < full
+    result = qf.simulate_module_swap("thrusters", 5, "E", variant="int_engine_size5_class1")
+    note = f"Thrusters is rated for ships up to {maxmass} t; fully loaded, your ship would weigh {round(full, 2)} t."
+    assert result["mass_note"] == note == "Thrusters is rated for ships up to 840 t; fully loaded, your ship would weigh 1474.0 t."
+    assert result["summary"].endswith(f" Note: {note}")
+    assert result["new_fuel_capacity"] == 64.0 and result["new_cargo_capacity"] == 348.0
+
+
+def test_the_thruster_note_comes_after_the_capacity_note():
+    # a swap that cuts capacity can't also be a thruster swap, so the order is pinned on the builder
+    built = qf._swap_summary({
+        "ship_name": "S", "slot": "X", "added": {"symbol": "y", "blueprint": None}, "removed": {"item": None},
+        "old_jump_range_now": None, "new_jump_range_now": None, "jump_range_change_now": None,
+        "old_jump_range_max": None, "new_jump_range_max": None, "jump_range_change_max": None,
+        "old_unladen_mass": None, "new_unladen_mass": None, "mass_change": None, "new_power_margin": None,
+        "capacity_note": "CAP", "mass_note": "Thrusters is rated for 1 t.", "state_note": None,
+    })
+    assert built == "S: adding y in X. Note: CAP. Note: Thrusters is rated for 1 t."
+
+
+def test_a_thruster_the_ship_does_not_outweigh_has_no_mass_note(tmp_path):
+    _type9_now(tmp_path)
+    result = qf.simulate_module_swap("thrusters", 7, "D")          # maxmass 2430 vs about 1,534 t loaded
+    assert result["found"] is True and result["compatible"] is True
+    assert "mass_note" not in result and "Note:" not in result["summary"]
+
+
+def test_only_thrusters_get_a_mass_note(tmp_path):
+    """Shield generators are exceeded in many real setups, so they carry no note."""
+    path = _type9_now(tmp_path)
+    maxmass = json.loads(_module_stat(path, "int_shieldgenerator_size3_class1", "extra_json"))["maxmass"]
+    assert maxmass < 1534
+    result = qf.simulate_module_swap("shield generator", 3, "E", slot="Slot03_Size6")
+    assert result["found"] is True and "mass_note" not in result
+
+
+# --- B9b: the capacities behind capacity_note are in the result -------------------------------------------
+
+def test_every_compatible_swap_reports_the_new_capacities(tmp_path):
+    _type9_now(tmp_path, fuel=10.0, cargo=100)
+    plain = _ls_swap()
+    assert (plain["new_fuel_capacity"], plain["new_cargo_capacity"]) == (64.0, 348.0)
+    tank = qf.simulate_module_swap("fuel tank", 3, "C")
+    assert tank["new_fuel_capacity"] == 8.0 and tank["new_cargo_capacity"] == 348.0
+    assert str(tank["new_fuel_capacity"]) in tank["capacity_note"]
+    rack = qf.simulate_module_swap("cargo rack", 3, "E", variant="int_cargorack_size3_class1", slot="Slot00_Size8")
+    assert rack["new_cargo_capacity"] == 228.0 and rack["new_fuel_capacity"] == 64.0
+
+
+def test_the_capacities_are_there_even_when_there_is_no_current_load(tmp_path):
+    _type9_now(tmp_path, fuel=None, cargo=None)
+    result = qf.simulate_module_swap("fuel tank", 3, "C")
+    assert result["new_fuel_capacity"] == 8.0 and result["new_cargo_capacity"] == 348.0
+    assert "capacity_note" not in result
+
+
+def test_incompatible_swaps_have_no_capacities(tmp_path):
+    _type9_now(tmp_path)
+    assert "new_fuel_capacity" not in qf.simulate_module_swap("life support", 8, "E")

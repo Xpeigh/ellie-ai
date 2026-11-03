@@ -176,7 +176,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "get_ship_info",
-            "description": "Get a named ship's base stats and slot layout.",
+            "description": "Get a named ship's hull mass and slot layout: core slot sizes, weapon hardpoints by size, utility mounts and internal slots.",
             "parameters": {
                 "type": "object",
                 "properties": {"ship_name": {"type": "string", "description": "Ship name, e.g. 'Python'"}},
@@ -197,7 +197,7 @@ TOOLS = [
                     "module_rating": {"type": "string", "description": "Module rating letter, e.g. 'A'"},
                     "blueprint_name": {"type": "string", "description": "Optional engineering blueprint to apply to the hypothetical module, e.g. 'Increased range'"},
                     "grade": {"type": "integer", "description": "Blueprint grade 1-5, required if blueprint_name is given"},
-                    "slot": {"type": "string", "description": "Optional exact slot name, e.g. 'Slot05_Size4' or 'MediumHardpoint2' -- needed if the ship has more than one slot of that type, or to put the module in an empty slot"},
+                    "slot": {"type": "string", "description": "Exact slot name taken from an earlier tool result, for example TinyHardpoint3 for a utility mount or Slot05_Size4 for an internal slot. Leave it out unless the tool asked for it."},
                     "variant": {"type": "string", "description": "Optional, only needed when several modules share the same type/class/rating -- e.g. 'gimballed', 'SCO', 'Mk II', 'guardian', or an exact symbol from a previous result's variants list"},
                 },
                 "required": ["module_group", "module_class", "module_rating"],

@@ -1,3 +1,4 @@
+import json
 import sys
 from pathlib import Path
 
@@ -82,3 +83,19 @@ def test_summary_then_freshness_then_jump_range_rules_follow_the_caveat_rule():
     assert lines[caveat + 1].startswith('- If a tool result has a "summary"')
     assert lines[caveat + 2].startswith("- Fuel, cargo, location and jump range change all the time")   # right after "summary"
     assert lines[caveat + 3].startswith('- When asked for the "jump range" without more detail')
+
+
+def test_get_ship_info_description_no_longer_promises_base_stats():
+    assert _description("get_ship_info") == (
+        "Get a named ship's hull mass and slot layout: core slot sizes, weapon hardpoints by size, "
+        "utility mounts and internal slots."
+    )
+    assert "base stats" not in json.dumps(ec.TOOLS).lower()
+
+
+def test_the_slot_argument_description_gives_examples_that_fit():
+    tool = next(t for t in ec.TOOLS if t["function"]["name"] == "simulate_module_swap")
+    assert tool["function"]["parameters"]["properties"]["slot"]["description"] == (
+        "Exact slot name taken from an earlier tool result, for example TinyHardpoint3 for a utility mount "
+        "or Slot05_Size4 for an internal slot. Leave it out unless the tool asked for it."
+    )

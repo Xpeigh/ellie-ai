@@ -10,6 +10,7 @@ hand; Coriolis (coriolis_blueprints) is the fallback for anything the
 sheet doesn't have filled in yet. See blueprint_mapping.py for why these
 two don't share a join key directly.
 """
+import difflib
 import functools
 import json
 import math
@@ -630,11 +631,92 @@ def _jump_check_warning(conn, params):
     return f"Ellie's mass estimate for your last jump was off by {abs(implied - modeled):.1f} t, so these jump ranges may be inaccurate."
 
 
+def _module_display_name(module_row):
+    """The human name of a module_stats row: Coriolis's own `name` (e.g.
+    "Frame Shift Drive (SCO)"), else its `ukName` ("FSD", "Cargo Rack"). A few
+    families (the weapons) carry neither, so those are named from their group
+    and mount ("Pulse Laser (fixed)"); a group Ellie has no name for falls back
+    to the raw symbol."""
+    extra = json.loads(module_row["extra_json"] or "{}")
+    name = extra.get("name") or extra.get("ukName")
+    if name:
+        return name
+    group = next((g for g, code in MODULE_GROUP_TO_GRP.items() if code == module_row["grp"]), None)
+    if group is None:
+        return module_row["symbol"]
+    mount = _MOUNT_WORDS.get(extra.get("mount"))
+    return f"{group.title()} ({mount})" if mount else group.title()
+
+
+def _module_fields(item, stats_row):
+    """{"module", "class", "rating"} for a fitted symbol. A symbol that isn't
+    in module_stats is listed by its raw name, with no class or rating."""
+    if stats_row is None:
+        return {"module": item}
+    fields = {"module": _module_display_name(stats_row)}
+    if stats_row["class"] is not None:
+        fields["class"] = stats_row["class"]
+    if stats_row["rating"] is not None:
+        fields["rating"] = stats_row["rating"]
+    return fields
+
+
+def _lookup_display_name(conn, sql, key):
+    """A display name from one of the Coriolis tables, or None -- also when the
+    table isn't there (a database set up without that step)."""
+    try:
+        row = conn.execute(sql, (key,)).fetchone()
+    except sqlite3.OperationalError as e:
+        if "no such table" not in str(e):
+            raise
+        return None
+    return row[0] if row and row[0] else None
+
+
+def _engineering_label(conn, blueprint, level, experimental):
+    """'Increased range g5, Mass Manager': the blueprint's display name and grade,
+    plus the experimental effect's name when one is fitted. Each name falls back
+    to the journal's own spelling when Coriolis doesn't know it."""
+    name = _lookup_display_name(
+        conn, "SELECT upgrade_name FROM coriolis_blueprints WHERE fdname = ? LIMIT 1", blueprint) or blueprint
+    label = f"{name} g{level}" if level is not None else name
+    if experimental:
+        label += ", " + (_lookup_display_name(
+            conn, "SELECT name FROM coriolis_experimental_effects WHERE edname = ? LIMIT 1", experimental) or experimental)
+    return label
+
+
+def _readable_modules(conn):
+    """The fitted modules as a compact, readable list: {"slot", "module",
+    "class", "rating", "on", "health"} plus "engineering" (one string) when
+    engineered. Cosmetic and zero-draw slots (armour, cockpit, paint, decals,
+    ship kits, voice pack, nameplates, bobbleheads, lights) are not modules and
+    are left out. The raw symbol and the numeric modifiers are not repeated:
+    a small model reading them misdescribed modules and the list ran to ~5,000
+    characters on a real ship."""
+    entries = []
+    rows = conn.execute(
+        "SELECT slot, item, is_on, health, engineering_blueprint, engineering_level, "
+        "engineering_experimental FROM current_loadout_modules ORDER BY slot"
+    ).fetchall()
+    for m in rows:
+        if _draws_nothing(m["item"].lower()):
+            continue
+        stats = conn.execute("SELECT * FROM module_stats WHERE symbol = ?", (m["item"].lower(),)).fetchone()
+        entry = {"slot": m["slot"], **_module_fields(m["item"], stats), "on": bool(m["is_on"]), "health": m["health"]}
+        if m["engineering_blueprint"]:
+            entry["engineering"] = _engineering_label(
+                conn, m["engineering_blueprint"], m["engineering_level"], m["engineering_experimental"])
+        entries.append(entry)
+    return entries
+
+
 @_needs_setup
 def get_current_loadout() -> dict:
     """The commander's real, current ship as captured from the journal's
-    own Loadout event -- ship, mass, jump range, and every fitted module
-    with its real engineering modifiers where present.
+    own Loadout event -- ship, mass, jump range, and every fitted real module
+    (named, with its class and rating, and its engineering as one short
+    string; cosmetic slots are left out).
 
     Two jump ranges, never to be confused: jump_range_max is the game's
     own MaxJumpRange (empty hold, one jump of fuel); jump_range_now is
@@ -648,11 +730,7 @@ def get_current_loadout() -> dict:
         if not status or not status["ship_key"]:
             return {"found": False, "reason": "no Loadout event captured yet -- journal_watcher may not be running, or you haven't launched/undocked this session"}
 
-        modules = conn.execute(
-            "SELECT slot, item, is_on, priority, health, engineering_blueprint, "
-            "engineering_level, engineering_quality, engineering_experimental, "
-            "engineering_modifiers_json FROM current_loadout_modules ORDER BY slot"
-        ).fetchall()
+        module_list = _readable_modules(conn)
         params = _fitted_fsd_params(conn)
         fuel_now, cargo_now, usable, state_note = _current_ship_state(conn, params)
         # the warning qualifies the current-load range, so it goes with it
@@ -660,22 +738,6 @@ def get_current_loadout() -> dict:
         ship_row = _resolve_ship_stats(conn, status["ship_key"])
     finally:
         conn.close()
-
-    module_list = []
-    for m in modules:
-        entry = {
-            "slot": m["slot"], "item": m["item"], "on": bool(m["is_on"]),
-            "health": m["health"],
-        }
-        if m["engineering_blueprint"]:
-            entry["engineering"] = {
-                "blueprint": m["engineering_blueprint"],
-                "level": m["engineering_level"],
-                "quality": m["engineering_quality"],
-                "experimental_effect": m["engineering_experimental"],
-                "modifiers": _modifier_list(m["engineering_modifiers_json"]),
-            }
-        module_list.append(entry)
 
     ship_name = ship_row["name"] if ship_row else status["ship_key"]
     unladen = status["unladen_mass"]
@@ -724,26 +786,92 @@ def get_current_loadout() -> dict:
     return result
 
 
+def _normalised_name(text):
+    """Lower-case letters and digits only: 'Type-9 Heavy' -> 'type9heavy'."""
+    return re.sub(r"[\W_]+", "", text.lower())
+
+
+def _match_ship(rows, typed):
+    """The one ship_stats row `typed` means, or None. In order: the exact name
+    (case-insensitive); the same name ignoring everything but letters and
+    digits; a UNIQUE prefix of that normalised form ('Type-9' -> 'Type-9
+    Heavy'). More than one prefix match is not a match: Ellie would be guessing."""
+    wanted = typed.strip().lower()
+    for row in rows:
+        if (row["name"] or "").lower() == wanted:
+            return row
+    key = _normalised_name(typed)
+    if not key:
+        return None
+    for row in rows:
+        if _normalised_name(row["name"] or "") == key:
+            return row
+    prefixed = [row for row in rows if _normalised_name(row["name"] or "").startswith(key)]
+    return prefixed[0] if len(prefixed) == 1 else None
+
+
+_CORE_SLOT_LABELS = ("power_plant", "thrusters", "frame_shift_drive", "life_support",
+                     "power_distributor", "sensors", "fuel_tank")
+
+
 @_needs_setup
 def get_ship_info(ship_name: str) -> dict:
-    """Base (unengineered) stats and slot layout for a named ship, from
-    coriolis-data via ingest_ship_modules.py. Matches by display name
-    (e.g. "Python") case-insensitively."""
+    """A named ship's hull mass and slot layout from coriolis-data (via
+    ingest_ship_modules.py), as LABELLED facts -- core slot sizes by name,
+    hardpoints by size, utility mounts, internal slots -- plus a pre-written
+    summary. The raw positional arrays of ship_stats (['standard', 'hardpoints',
+    'internal'] as bare numbers) were being misread by small models."""
     conn = _connect()
     try:
-        row = conn.execute(
-            "SELECT * FROM ship_stats WHERE lower(name) = lower(?)", (ship_name,)
-        ).fetchone()
+        rows = conn.execute("SELECT * FROM ship_stats").fetchall()
     finally:
         conn.close()
-    if not row:
-        return {"found": False, "ship_name": ship_name}
+    row = _match_ship(rows, ship_name)
+    if row is None:
+        result = {"found": False, "reason": f"Ellie has no ship called '{ship_name}' in her ship data."}
+        by_normalised = {}
+        for r in rows:
+            by_normalised.setdefault(_normalised_name(r["name"] or ""), r["name"])
+        close = difflib.get_close_matches(_normalised_name(ship_name), list(by_normalised), n=3)
+        if close:
+            result["did_you_mean"] = [by_normalised[c] for c in close]
+        return result
+
+    slots = json.loads(row["slots_json"])
+    standard = slots.get("standard") or []
+    hardpoint_classes = [_entry_class(e) for e in slots.get("hardpoints") or []]
+    internal = slots.get("internal") or []
+    plain_sizes = [e for e in internal if isinstance(e, int)]
+    hardpoints = {word: hardpoint_classes.count(c) for word, c in
+                  (("small", 1), ("medium", 2), ("large", 3), ("huge", 4))}
+    utility_mounts = hardpoint_classes.count(0)
+    core = dict(zip(_CORE_SLOT_LABELS, standard)) if len(standard) == len(_CORE_SLOT_LABELS) else {}
+    summary = (
+        f"{row['name']} ({row['manufacturer']}): hull mass {row['hull_mass']} t; "
+        f"hardpoints: {hardpoints['small']} small, {hardpoints['medium']} medium, "
+        f"{hardpoints['large']} large, {hardpoints['huge']} huge; "
+        f"{utility_mounts} utility mounts; {len(internal)} internal slots"
+    )
+    if core:
+        summary += (
+            f"; core slots: power plant {core['power_plant']}, thrusters {core['thrusters']}, "
+            f"frame shift drive {core['frame_shift_drive']}, life support {core['life_support']}, "
+            f"power distributor {core['power_distributor']}, sensors {core['sensors']}, fuel tank {core['fuel_tank']}"
+        )
     return {
         "found": True,
         "name": row["name"],
         "manufacturer": row["manufacturer"],
         "hull_mass": row["hull_mass"],
-        "slots": json.loads(row["slots_json"]),
+        "core_slots": core,
+        "hardpoints": hardpoints,
+        "utility_mounts": utility_mounts,
+        "internal_slots": {
+            "total": len(internal),
+            "sizes": {str(c): plain_sizes.count(c) for c in sorted(set(plain_sizes), reverse=True)},
+            "reserved": [{"name": e.get("name"), "class": e.get("class")} for e in internal if isinstance(e, dict)],
+        },
+        "summary": summary + ".",
     }
 
 
@@ -816,7 +944,58 @@ def _resolve_explicit_slot(conn, explicit_slot):
     return f"{size_word.capitalize()}{'Mining' if mining else ''}Hardpoint{index}", None
 
 
-def _resolve_target_slot(conn, ship_key, grp, explicit_slot):
+def _which_slot_reason(conn, ship_key, module_kind, module_class):
+    """The reply for "a utility module / weapon / internal module, and no slot
+    named": which real slot names to choose from, taken from the ship's layout
+    and what is fitted, instead of an instruction with no names in it. None when
+    it can't say (unknown ship or module kind)."""
+    ship_row = _resolve_ship_stats(conn, ship_key)
+    if ship_row is None or module_kind not in ("utility", "weapon", "internal"):
+        return None
+    ship_name = ship_row["name"] or ship_key
+    fitted = conn.execute("SELECT slot, item FROM current_loadout_modules ORDER BY slot").fetchall()
+
+    if module_kind == "internal":
+        shown = []
+        for r in fitted:
+            if _OPTIONAL_INTERNAL_SLOT_RE.fullmatch(r["slot"]) and len(shown) < 6:
+                stats = conn.execute("SELECT * FROM module_stats WHERE symbol = ?", (r["item"].lower(),)).fetchone()
+                shown.append(f"{r['slot']} ({_module_fields(r['item'], stats)['module']})")
+        example = f", for example one of your fitted internal slots: {', '.join(shown)}" if shown else ""
+        return f"Which internal slot? Name one with slot{example}. Ellie cannot see empty internal slots in the journal."
+
+    classes = [_entry_class(e) for e in json.loads(ship_row["slots_json"]).get("hardpoints") or []]
+    fitted_hardpoints = {}
+    for r in fitted:
+        parsed = _parse_hardpoint_name(r["slot"])
+        if parsed:
+            fitted_hardpoints[parsed] = r["slot"]
+    if module_kind == "utility":
+        words, noun = ("tiny",), "utility mounts"
+    else:
+        words = tuple(w for w in ("small", "medium", "large", "huge") if _HARDPOINT_MAX_CLASS[w] >= module_class)
+        noun = f"hardpoints that fit a class {module_class} weapon"
+    free, in_use = [], []
+    for word in words:
+        for i in range(1, classes.count(_HARDPOINT_MAX_CLASS[word]) + 1):
+            real = fitted_hardpoints.get((word, False, i))
+            if real:
+                in_use.append(real)
+            else:
+                free.append(f"{word.capitalize()}Hardpoint{i}")
+    n = len(free) + len(in_use)
+    question = "Which utility mount?" if module_kind == "utility" else "Which hardpoint?"
+    if n == 0:
+        if module_kind == "utility":
+            return f"Your {ship_name} has no utility mounts."
+        return f"Your {ship_name} has no hardpoint that fits a class {module_class} weapon."
+    if free:
+        return f"{question} Your {ship_name} has {n} {noun}; free right now: {', '.join(free)}. Name one with slot."
+    return (f"Your {ship_name} has {n} {noun} and all of them are in use; "
+            f"to replace one, name it with slot: {', '.join(in_use)}.")
+
+
+def _resolve_target_slot(conn, ship_key, grp, explicit_slot, module_kind=None, module_class=None):
     """Which slot a swap targets. An explicit slot always wins (casing
     corrected against reality, R5). Otherwise: resolve from what's
     CURRENTLY FITTED of that grp first (R1) -- this must run before the
@@ -843,10 +1022,13 @@ def _resolve_target_slot(conn, ship_key, grp, explicit_slot):
     if len(fitted) == 1:
         return fitted[0]["slot"], None
     if len(fitted) > 1:
-        return None, f"ship has {len(fitted)} slots of that type fitted -- specify which slot"
+        names = ", ".join(sorted(r["slot"] for r in fitted))
+        return None, f"ship has {len(fitted)} slots of that type fitted -- specify which slot: {names}"
     if grp in STANDARD_SLOT_NAMES:
         return STANDARD_SLOT_NAMES[grp], None
-    return None, "nothing of that type is currently fitted, so there's no slot to resolve automatically -- specify slot explicitly (e.g. an empty utility slot's name)"
+    return None, _which_slot_reason(conn, ship_key, module_kind, module_class) or (
+        "nothing of that type is currently fitted, so there's no slot to resolve automatically -- "
+        "specify slot explicitly (e.g. an empty utility slot's name)")
 
 
 def _resolve_ship_stats(conn, ship_key):
@@ -1388,6 +1570,8 @@ def _swap_summary(result):
     # and the caveat about an empty slot that couldn't be confirmed
     if result.get("capacity_note"):
         summary += f" Note: {result['capacity_note']}."
+    if result.get("mass_note"):
+        summary += f" Note: {result['mass_note']}"
     if result["added"].get("blueprint"):
         summary += f" Blueprint: {result['added']['blueprint']} grade {result['added']['blueprint_grade']}."
     if result.get("unmodeled_blueprint_effects"):
@@ -1402,6 +1586,15 @@ def _swap_summary(result):
 
 
 @_needs_setup
+def _unset(value):
+    """A small model's way of saying "not given": the strings 'None', 'null',
+    'undefined' or an empty one (llama3.2 passed slot="None"). A real slot,
+    variant or blueprint is never called that."""
+    if isinstance(value, str) and value.strip().lower() in ("", "none", "null", "undefined"):
+        return None
+    return value
+
+
 def simulate_module_swap(module_group: str, module_class: int, module_rating: str,
                           blueprint_name: str = None, grade: int = None, slot: str = None,
                           variant: str = None) -> dict:
@@ -1415,6 +1608,7 @@ def simulate_module_swap(module_group: str, module_class: int, module_rating: st
     grp = _module_group_to_grp(module_group)
     if grp is None:
         return {"found": False, "reason": f"'{module_group}' isn't a recognized module type"}
+    slot, variant, blueprint_name = _unset(slot), _unset(variant), _unset(blueprint_name)
 
     # N4/S5: a small model can easily pass "5" instead of 5 -- accept
     # either (or a whole-number float, T2/NB2), reject anything else (or
@@ -1434,7 +1628,17 @@ def simulate_module_swap(module_group: str, module_class: int, module_rating: st
         if not baseline or not baseline["ship_key"]:
             return {"found": False, "reason": "no current loadout captured yet -- journal_watcher may not be running"}
 
-        target_slot, slot_error = _resolve_target_slot(conn, baseline["ship_key"], grp, slot)
+        # The candidate modules are looked up first only so that "which slot?"
+        # can say what KIND of module this is (a utility module, a weapon, an
+        # internal one); nothing here returns before the slot is resolved.
+        raw_candidates = conn.execute(
+            "SELECT * FROM module_stats WHERE grp = ? AND class = ? AND lower(rating) = lower(?)",
+            (grp, module_class, module_rating),
+        ).fetchall()
+        module_kind = _module_kind(raw_candidates[0]["symbol"], grp, module_class) if raw_candidates else None
+
+        target_slot, slot_error = _resolve_target_slot(
+            conn, baseline["ship_key"], grp, slot, module_kind=module_kind, module_class=module_class)
         if slot_error:
             return {"found": False, "reason": slot_error}
 
@@ -1455,17 +1659,11 @@ def simulate_module_swap(module_group: str, module_class: int, module_rating: st
         # ambiguous slot gets. raw_candidates (before the variant filter) is
         # also what S1's kind check uses -- every candidate for one grp shares
         # a kind, so this is valid before any variant disambiguation.
-        raw_candidates = conn.execute(
-            "SELECT * FROM module_stats WHERE grp = ? AND class = ? AND lower(rating) = lower(?)",
-            (grp, module_class, module_rating),
-        ).fetchall()
-
         # S1: does this module kind even fit this slot kind? Runs before the
         # variants ambiguity response and before the size check -- "a beam
         # laser in an internal slot" is wrong whichever mount is meant, so
         # don't make the user pick a mount first.
         if raw_candidates:
-            module_kind = _module_kind(raw_candidates[0]["symbol"], grp, module_class)
             mismatch = _kind_mismatch_reason(module_group, grp, module_kind, slot_kind, target_slot)
             if mismatch:
                 return {"found": True, "compatible": False, "slot": target_slot, "reason": mismatch}
@@ -1648,18 +1846,19 @@ def simulate_module_swap(module_group: str, module_class: int, module_rating: st
         fuel_now, cargo_now, state_usable, state_note = _current_ship_state(conn, fitted_fsd)
         old_range_now = new_range_now_min = new_range_now_max = None
         capacity_note = None
+        # The swap can change what the ship can hold. Capacities are the
+        # Loadout's own totals less the removed module's share plus the added
+        # module's; they are reported on every compatible result so the figures
+        # in capacity_note (and the thruster mass note) appear in it too.
+        new_fuel_capacity = new_cargo_capacity = None
+        if baseline["fuel_main"] is not None:
+            new_fuel_capacity = baseline["fuel_main"] - _module_tank_fuel(old_stats) + _module_tank_fuel(new_module)
+        if baseline["cargo_capacity"] is not None:
+            removed_cargo = _module_rack_cargo(old_stats, old_module_row["engineering_modifiers_json"] if old_module_row else None)
+            new_cargo_capacity = baseline["cargo_capacity"] - removed_cargo + _module_rack_cargo(new_module)
         if state_usable:
-            # The swap can change what the ship can hold: the new figures use
-            # the fuel and cargo that still fit (old_* and the reported
-            # fuel_now/cargo_now stay the real current values). Capacities are
-            # the Loadout's own totals less the removed module's share plus the
-            # added module's.
-            new_fuel_capacity = new_cargo_capacity = None
-            if baseline["fuel_main"] is not None:
-                new_fuel_capacity = baseline["fuel_main"] - _module_tank_fuel(old_stats) + _module_tank_fuel(new_module)
-            if baseline["cargo_capacity"] is not None:
-                removed_cargo = _module_rack_cargo(old_stats, old_module_row["engineering_modifiers_json"] if old_module_row else None)
-                new_cargo_capacity = baseline["cargo_capacity"] - removed_cargo + _module_rack_cargo(new_module)
+            # The new figures use the fuel and cargo that still fit (old_* and
+            # the reported fuel_now/cargo_now stay the real current values).
             fuel_for_new = _capped(fuel_now, new_fuel_capacity)
             cargo_for_new = _capped(cargo_now, new_cargo_capacity)
             capacity_note = _capacity_note(fuel_now, new_fuel_capacity, cargo_now, new_cargo_capacity)
@@ -1695,12 +1894,31 @@ def simulate_module_swap(module_group: str, module_class: int, module_rating: st
             margin_max = plant_output_max - (draw_total + new_power_min)
             new_power_margin = _min_max_or_single(margin_min, margin_max)
 
+        # B8: a thruster is rated for ships up to a maximum mass. Measured on every
+        # real thruster fitting (1,854) the loaded ship was below it, so only a
+        # hypothetical thruster that falls short is worth a note. (Shield
+        # generators are rated the same way but real setups exceed it often, so
+        # they get nothing.)
+        mass_note = None
+        if new_module["grp"] == "t":
+            maxmass = new_module_extra_get(new_module, "maxmass")
+            if maxmass is not None and None not in (new_unladen_max, new_fuel_capacity, new_cargo_capacity):
+                fully_loaded = new_unladen_max + new_fuel_capacity + new_cargo_capacity
+                if fully_loaded > maxmass:
+                    mass_note = (
+                        f"{_module_display_name(new_module)} is rated for ships up to {round(maxmass, 2)} t; "
+                        f"fully loaded, your ship would weigh {round(fully_loaded, 2)} t."
+                    )
+
         result = {
             "found": True,
             "compatible": True,
             "ship_name": ship_row["name"] if ship_row else baseline["ship_key"],
             "slot": target_slot,
-            "removed": {"item": old_module_row["item"] if old_module_row else None},
+            "removed": (
+                {"item": old_module_row["item"], **_module_fields(old_module_row["item"], old_stats)}
+                if old_module_row else {"item": None}
+            ),
             "added": {
                 "symbol": new_module["symbol"], "class": module_class, "rating": module_rating,
                 "blueprint": blueprint_note,
@@ -1720,6 +1938,8 @@ def simulate_module_swap(module_group: str, module_class: int, module_rating: st
             "old_jump_range_max": _round2(old_range_max),
             "new_jump_range_max": _min_max_or_single(new_range_min, new_range_max) if new_range_min is not None else None,
             "jump_range_change_max": range_change_max,
+            "new_fuel_capacity": _round2(new_fuel_capacity),
+            "new_cargo_capacity": _round2(new_cargo_capacity),
             "power_change": _min_max_or_single(power_change_min, power_change_max),
             "new_power_margin": new_power_margin,
             "power_unknown_modules": unknown_power_items,  # honestly-reported, never silently dropped
@@ -1727,6 +1947,8 @@ def simulate_module_swap(module_group: str, module_class: int, module_rating: st
         }
         if capacity_note:
             result["capacity_note"] = capacity_note
+        if mass_note:
+            result["mass_note"] = mass_note
         if caveat:
             # S3(c): only on the "unfitted internal slot, existence inferred
             # not confirmed" path -- Task 6 relays this to the model.
