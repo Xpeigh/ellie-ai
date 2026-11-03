@@ -48,27 +48,54 @@ _history_lock = threading.Lock()
 
 # How long to wait before starting the watcher again after it stops.
 WATCHER_RESTART_SECONDS = 5
+# While the journal folder is missing the wait doubles each time (5, 10, 20, 40 ...)
+# up to this cap; a watcher that ran this long counts as having had a folder.
+WATCHER_MAX_BACKOFF_SECONDS = 60
+WATCHER_STABLE_RUN_SECONDS = 30
 
 
-def watch_forever(target, sleep=time.sleep, delay=None):
+def watch_forever(target, sleep=time.sleep, delay=None, clock=time.monotonic):
     """Keep `target` (the journal watcher) running for as long as the app
     does: if it raises or returns, say so on stderr, wait `delay` seconds
     (WATCHER_RESTART_SECONDS by default) and start it again. A watcher thread
     that simply died would leave the tools quietly serving stale fuel and
-    loadout. `sleep` is injectable so a test doesn't have to wait."""
-    if delay is None:
-        delay = WATCHER_RESTART_SECONDS
+    loadout.
+
+    When the journal folder is missing (the game has never run) it backs off
+    instead of retrying every few seconds forever: the wait doubles from `delay`
+    up to WATCHER_MAX_BACKOFF_SECONDS, a line is printed only when that wait
+    changes, and the back-off starts over once the folder exists (the watcher
+    ran, or ended some other way). `sleep` and `clock` are injectable so a test
+    doesn't have to wait."""
+    base = WATCHER_RESTART_SECONDS if delay is None else delay
+    cap = max(base, WATCHER_MAX_BACKOFF_SECONDS)
+    misses = 0            # consecutive "no journal folder" failures
+    announced = None      # the back-off wait last printed for this streak
     while True:
+        started = clock()
+        wait = base
         try:
             target()
-            print("[journal_watcher] returned unexpectedly -- restarting", file=sys.stderr)
+            outcome = "returned unexpectedly -- restarting"
         except FileNotFoundError as e:
-            # no journal yet (the game hasn't run): one line per retry, not a traceback
-            print(f"[journal_watcher] {e} -- live status/materials won't update until this is fixed; retrying", file=sys.stderr)
+            if clock() - started >= WATCHER_STABLE_RUN_SECONDS:
+                misses, announced = 0, None       # it was running fine: a new problem, not the same streak
+            misses += 1
+            wait = min(base * 2 ** (misses - 1), cap)
+            if wait != announced:
+                print(f"[journal_watcher] {e} -- live status/materials won't update until this is fixed; "
+                      f"retrying in {wait} s", file=sys.stderr)
+                announced = wait
+            sleep(wait)
+            continue
         except Exception:
             traceback.print_exc()
-            print("[journal_watcher] stopped unexpectedly -- restarting", file=sys.stderr)
-        sleep(delay)
+            outcome = "stopped unexpectedly -- restarting"
+        if misses:
+            print("[journal_watcher] journal folder found", file=sys.stderr)
+        misses, announced = 0, None
+        print(f"[journal_watcher] {outcome}", file=sys.stderr)
+        sleep(wait)
 
 
 def _run_watcher():

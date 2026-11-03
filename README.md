@@ -31,12 +31,39 @@ are read from the game's own journal files, so nothing is sent anywhere and no a
 - Git
 - Disk space: the EDSM dumps are about 3.3 GB compressed, and the finished database is a few hundred MB
 
+### System requirements
+
+On top of Elite Dangerous itself (measured on an 8-core i7-11700K with an RTX 5070 Ti, Ollama 0.40.13):
+
+| | Minimum | Recommended |
+|---|---|---|
+| Graphics card | 8 GB VRAM | 12 GB VRAM or more |
+| RAM | 16 GB | 16 GB (32 GB if you run other tools) |
+| CPU | anything that runs the game | anything that runs the game |
+| Free storage | about 6 GB | about 8 GB, on an SSD |
+
+- The model (`bonsai-2:4b`) is a 1.6 GB download and about 1.7-1.9 GB once loaded.
+- Expect about 2 s per answer on a modern GPU.
+- With no usable GPU Ellie still works, but the first answer takes about 48 s on an 8-core desktop CPU and
+  later answers about 5 s, and she competes with the game for the CPU.
+- She needs Ollama 0.40.6 or newer.
+- Ollama unloads the model after 5 minutes idle. Set its keep-alive (`OLLAMA_KEEP_ALIVE`, for example `30m`)
+  to keep it ready.
+- The EDSM dumps (about 3.3 GB compressed) are only needed for the import, and the finished database is
+  about 0.35 GB.
+
+Caveats: this was tested on NVIDIA only. The 8 GB VRAM minimum is derived (the game's own VRAM use was not
+measured), so see the game's store page for its own requirements.
+
 ## Setup
 
 ```bash
 pip install -r requirements.txt
-ollama pull granite4.1:3b
+ollama pull bonsai-2:4b
 ```
+
+`bonsai-2:4b` is the default model. `granite4.1:3b` is the tested alternative: pull it from Ollama and
+start the chat with `python ellie_chat.py granite4.1:3b`.
 
 **1. Coriolis data** (blueprint and experimental-effect materials):
 

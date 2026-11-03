@@ -17,6 +17,7 @@ if one of them ever fails).
 Run this once before your first `python ellie_chat.py`:
     python setup.py
 """
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -37,7 +38,9 @@ EDSM_FILES = {
 }
 
 XLSX_PATH = SCRIPT_DIR / "Engineers.xlsx"
-MODEL = "granite4.1:3b"
+MODEL = "bonsai-2:4b"
+# bonsai-2:4b runs on Ollama 0.40.6 or newer (older builds can't load it)
+BONSAI_MIN_OLLAMA = (0, 40, 6)
 
 # table -> which step owns it, for the final readiness report
 STEP_TABLES = {
@@ -81,6 +84,26 @@ def _table_count(table):
         conn.close()
 
 
+def _parse_version(text):
+    """(major, minor, patch) from '0.40.13', 'v0.40.6' or '0.40.6-rc1'; None
+    when it isn't a version. Compared as numbers: as text '0.40.13' < '0.40.6'."""
+    if not isinstance(text, str):
+        return None
+    m = re.match(r"\s*v?(\d+)\.(\d+)\.(\d+)", text)
+    return tuple(int(part) for part in m.groups()) if m else None
+
+
+def ollama_version_warning(version, model=None):
+    """The warning to print for this Ollama version and model, or None. Only
+    bonsai-2:4b needs a new Ollama, and a version that can't be read is not a
+    reason to say anything."""
+    model = MODEL if model is None else model
+    parsed = _parse_version(version)
+    if model != "bonsai-2:4b" or parsed is None or parsed >= BONSAI_MIN_OLLAMA:
+        return None
+    return f"bonsai-2:4b needs Ollama 0.40.6 or newer; you have {version}. Update Ollama from https://ollama.com."
+
+
 def check_ollama():
     """Ollama itself and the model can't be bundled into a future .exe --
     gigabytes, and a separate local server -- so this only checks and
@@ -101,6 +124,14 @@ def check_ollama():
             "Install it from https://ollama.com, make sure it's running, then re-run this script."
         )
         return False
+
+    try:
+        version = requests.get("http://localhost:11434/api/version", timeout=5).json().get("version")
+    except (requests.exceptions.RequestException, ValueError, AttributeError):
+        version = None
+    warning = ollama_version_warning(version, MODEL)
+    if warning:
+        print(warning)    # carry on: the model may still work, and the commander decides
 
     models = {m.get("name") for m in resp.json().get("models", [])}
     if MODEL in models:
