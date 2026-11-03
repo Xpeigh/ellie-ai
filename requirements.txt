@@ -1,4 +1,4 @@
-ollama
+ollama>=0.6.0
 openpyxl
 ijson
 requests

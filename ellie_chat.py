@@ -5,24 +5,56 @@ Ellie must never state a material count, distance, or blueprint
 requirement from her own "knowledge," only from what a tool returns.
 
 Needs a running Ollama (usually automatic once installed) with the model
-pulled: `ollama pull granite4.1:3b`. Pass another model name as the first
-argument to try a different one: `python ellie_chat.py qwen3:4b`.
+pulled: `ollama pull bonsai-2:4b`. Pass another model name as the first
+argument to try a different one: `python ellie_chat.py granite4.1:3b`.
 
 The message/tool_call handling follows Ollama's official examples
 (ollama-python examples/tools.py, examples/multi-tool.py). How reliably a
 given model picks the right tool and fills in arguments is model-dependent
--- granite4.1:3b was chosen from a head-to-head test, see plan.md.
+-- bonsai-2:4b is the default after a benchmark of this very chat loop;
+granite4.1:3b, the earlier choice (see plan.md), remains the tested
+alternative.
+
+Three things here exist because of how small local models behave:
+  - a context window big enough for the tool schemas plus a real answer
+    (Ollama's own default, 4,096 tokens, silently truncates the prompt), with
+    the oldest finished turns dropped before the prompt would overflow it;
+  - old tool results shrunk to their summary once their turn is over, so a
+    figure from an earlier reply (fuel, cargo, location) is never presented as
+    current and the history doesn't fill the window;
+  - thinking off by default, and a retry plus a fixed apology when the model
+    returns nothing.
 """
 import json
+import os
+import sys
 
 from ollama import chat
 
 import query_functions as qf
 
-import sys
-
-MODEL = sys.argv[1] if len(sys.argv) > 1 else "granite4.1:3b"
+DEFAULT_MODEL = "bonsai-2:4b"
+MODEL = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_MODEL
 MAX_TOOL_ROUNDS = 5
+
+DEFAULT_NUM_CTX = 8192
+
+
+def _parse_num_ctx(value):
+    """ELLIE_NUM_CTX as a positive integer, else the default."""
+    try:
+        n = int(str(value).strip())
+    except ValueError:
+        return DEFAULT_NUM_CTX
+    return n if n > 0 else DEFAULT_NUM_CTX
+
+
+NUM_CTX = _parse_num_ctx(os.environ.get("ELLIE_NUM_CTX"))
+
+EMPTY_ANSWER_FALLBACK = "I couldn't produce an answer that time. Please ask again, or try a shorter question."
+STALE_PREFIX = "[earlier result, may be out of date] "
+CHARS_PER_TOKEN = 3.3          # measured on this project's prompts; deliberately on the cautious side
+PROMPT_BUDGET = 0.75           # of the window; the rest is for the answer
 
 SYSTEM_PROMPT = """You are Ellie, a personal Elite Dangerous engineering assistant running on the commander's own machine.
 
@@ -34,6 +66,7 @@ RULES:
 - If a tool result has a "variants" list, the request matched several different real modules -- list them for the commander and ask which one they mean (then call the tool again with `variant`); don't say the data is missing, and don't pick one yourself.
 - If a tool result has a "caveat", tell the commander it along with the numbers -- never drop it.
 - If a tool result has a "summary", base your answer on it: you may rephrase, but keep every number and unit exactly as written.
+- Fuel, cargo, location and jump range change all the time: call the tool again for every question about them, and never reuse a number from an earlier reply.
 - When asked for the "jump range" without more detail, give jump_range_now (the range with the current fuel and cargo); mention jump_range_max only as the empty-ship maximum, never as the current range.
 - Once you have enough information to call a tool, call it immediately. Don't ask the commander to confirm an obvious detail (like a system name they already gave you) before proceeding.
 - Keep answers short and conversational, like a ship's computer, not a report.
@@ -115,7 +148,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "player_state",
-            "description": "Get the commander's current status (ship, system, station, ranks, credits) and a per-category summary of materials currently on hand.",
+            "description": "Get the commander's rank, credits, current system and station. It does NOT know fuel, cargo or jump range: use get_current_loadout for those.",
             "parameters": {"type": "object", "properties": {}},
         },
     },
@@ -135,7 +168,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "get_current_loadout",
-            "description": "Get the commander's current ship: its jump range right now (with the fuel and cargo on board), its empty-ship maximum jump range, mass, and every fitted module including real engineering modifiers.",
+            "description": "Get the commander's current ship: fuel on board, cargo carried, jump range right now (with that fuel and cargo), the empty-ship maximum jump range, mass, and every fitted module with its class, rating and engineering.",
             "parameters": {"type": "object", "properties": {}},
         },
     },
@@ -206,27 +239,99 @@ def call_tool(name, arguments):
         return {"error": f"'{name}' failed unexpectedly: {e}"}
 
 
+def _role(message):
+    return message.get("role") if isinstance(message, dict) else getattr(message, "role", None)
+
+
+def _is_empty(text):
+    return not (text or "").strip()
+
+
+def _estimated_tokens(messages):
+    """A cautious estimate of the prompt size: the messages as JSON plus the
+    tool schemas, which ride along with every request."""
+    return (len(json.dumps(messages, default=str)) + len(json.dumps(TOOLS))) / CHARS_PER_TOKEN
+
+
+def _trim_history(history):
+    """Drop the OLDEST complete earlier turns (a user message and everything up
+    to just before the next user message) until the prompt is under
+    PROMPT_BUDGET of the window. Never the system message, never the current
+    turn (the last user message and what follows it). In place, so the
+    caller's history stays valid for the next question."""
+    limit = PROMPT_BUDGET * NUM_CTX
+    while _estimated_tokens(history) > limit:
+        users = [i for i, m in enumerate(history) if _role(m) == "user"]
+        if len(users) < 2:
+            return
+        del history[users[0]:users[1]]
+
+
+def _chat(messages):
+    return chat(
+        model=MODEL, messages=messages, tools=TOOLS,
+        options={"num_ctx": NUM_CTX},
+        # thinking is off unless asked for: measured harmless on every model
+        # tried, and a thinking model burned its output budget and returned
+        # an empty answer with it on
+        think=os.environ.get("ELLIE_THINK") == "1",
+    )
+
+
+def _compact_tool_results(history, produced):
+    """Once a turn is over, shrink each tool result it produced to its summary
+    (else the first 400 characters of its JSON), marked as possibly stale: a
+    follow-up like "and with grade 5 instead?" still has the numbers, but an
+    old fuel or cargo figure is no longer presented as current and the history
+    stops filling the window."""
+    for message, result in produced:
+        if isinstance(result, dict) and result.get("summary"):
+            text = str(result["summary"])
+        else:
+            text = json.dumps(result)[:400]
+        compact = {"role": "tool", "tool_name": message["tool_name"], "content": STALE_PREFIX + text}
+        for i, kept in enumerate(history):
+            if kept is message:
+                history[i] = compact
+                break
+
+
 def ask_ellie(user_message, history):
     """history is a list of message dicts starting with the system
     prompt; mutated and returned so a caller can keep a conversation
     going across calls."""
     history.append({"role": "user", "content": user_message})
+    current_question = history[-1]
+    produced = []          # (tool message, result) for this turn, compacted when it ends
 
-    for _ in range(MAX_TOOL_ROUNDS):
-        response = chat(model=MODEL, messages=history, tools=TOOLS)
-        msg = response.message
-        history.append(msg)
+    try:
+        for _ in range(MAX_TOOL_ROUNDS):
+            _trim_history(history)
+            response = _chat(history)
+            msg = response.message
+            if not msg.tool_calls and (_is_empty(msg.content) or getattr(response, "done_reason", None) == "length"):
+                # nothing usable (or cut off): one more try with only the
+                # system message and this question, then a fixed apology
+                system = [m for m in history[:1] if _role(m) == "system"]
+                response = _chat(system + [current_question])
+                msg = response.message
+                if not msg.tool_calls and _is_empty(msg.content):
+                    history.append({"role": "assistant", "content": EMPTY_ANSWER_FALLBACK})
+                    return EMPTY_ANSWER_FALLBACK, history
+            history.append(msg)
 
-        if not msg.tool_calls:
-            return msg.content, history
+            if not msg.tool_calls:
+                return msg.content, history
 
-        for call in msg.tool_calls:
-            result = call_tool(call.function.name, call.function.arguments)
-            history.append(
-                {"role": "tool", "tool_name": call.function.name, "content": json.dumps(result)}
-            )
+            for call in msg.tool_calls:
+                result = call_tool(call.function.name, call.function.arguments)
+                tool_message = {"role": "tool", "tool_name": call.function.name, "content": json.dumps(result)}
+                history.append(tool_message)
+                produced.append((tool_message, result))
 
-    return "Sorry, I got stuck trying to answer that -- too many tool calls in a row.", history
+        return "Sorry, I got stuck trying to answer that -- too many tool calls in a row.", history
+    finally:
+        _compact_tool_results(history, produced)
 
 
 def main():
