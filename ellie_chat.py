@@ -72,6 +72,9 @@ RULES:
 - When asked for the "jump range" without more detail, give jump_range_now (the range with the current fuel and cargo); mention jump_range_max only as the empty-ship maximum, never as the current range.
 - Once you have enough information to call a tool, call it immediately. Don't ask the commander to confirm an obvious detail (like a system name they already gave you) before proceeding.
 - Keep answers short and conversational, like a ship's computer, not a report.
+- Answer in at most three short sentences, in plain language. Never mention tools, tool results, 'found' or your own reasoning, and never explain abbreviations unless a tool result does.
+- When the commander names a module type, class and rating (for example 'class 4 rating D sensors'), call simulate_module_swap right away. It finds the current module and the slot by itself: never ask the commander for them.
+- If a tool reply says it needs a slot or a variant, ask the commander which one, listing the options the tool gave.
 """
 
 TOOLS = [

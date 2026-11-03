@@ -99,3 +99,24 @@ def test_the_slot_argument_description_gives_examples_that_fit():
         "Exact slot name taken from an earlier tool result, for example TinyHardpoint3 for a utility mount "
         "or Slot05_Size4 for an internal slot. Leave it out unless the tool asked for it."
     )
+
+
+def test_system_prompt_ends_with_the_three_rules_the_model_benchmark_measured():
+    """Style rule, then 'call the swap tool right away', then 'ask only when the tool asks'.
+    The exact wording and order were benchmarked (bonsai-2:4b 77% -> 84%, swap questions 51% -> 80%,
+    answers 154 -> 104 characters); change them only with a new benchmark run."""
+    lines = ec.SYSTEM_PROMPT.splitlines()
+    assert lines[-4] == "- Keep answers short and conversational, like a ship's computer, not a report."
+    assert lines[-3] == (
+        "- Answer in at most three short sentences, in plain language. Never mention tools, tool results, "
+        "'found' or your own reasoning, and never explain abbreviations unless a tool result does."
+    )
+    assert lines[-2] == (
+        "- When the commander names a module type, class and rating (for example 'class 4 rating D sensors'), "
+        "call simulate_module_swap right away. It finds the current module and the slot by itself: "
+        "never ask the commander for them."
+    )
+    assert lines[-1] == (
+        "- If a tool reply says it needs a slot or a variant, ask the commander which one, "
+        "listing the options the tool gave."
+    )
