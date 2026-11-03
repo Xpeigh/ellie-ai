@@ -62,8 +62,10 @@ pip install -r requirements.txt
 ollama pull bonsai-2:4b
 ```
 
-`bonsai-2:4b` is the default model. `granite4.1:3b` is the tested alternative: pull it from Ollama and
-start the chat with `python ellie_chat.py granite4.1:3b`.
+`bonsai-2:4b` is the default model. To try another one, pull it from Ollama and either set the `ELLIE_MODEL`
+environment variable (this works for the chat window too) or start the terminal chat with
+`python ellie_chat.py <model>`. [docs/models.md](docs/models.md) lists the models we tested, with scores and licenses;
+`lfm3:1.7b-q4_K_M` (1.1 GB) is the lightweight alternative.
 
 **1. Coriolis data** (blueprint and experimental-effect materials):
 

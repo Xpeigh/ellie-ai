@@ -5,11 +5,21 @@ from pathlib import Path
 README = (Path(__file__).resolve().parent.parent / "README.md").read_text(encoding="utf-8")
 
 
-def test_the_setup_pulls_the_default_model_and_names_the_tested_alternative():
+def test_the_setup_pulls_the_default_model_and_explains_how_to_try_another():
     assert "ollama pull bonsai-2:4b" in README
     assert "ollama pull granite4.1:3b" not in README
-    assert "granite4.1:3b" in README                       # as the tested alternative
-    assert "python ellie_chat.py granite4.1:3b" in README
+    assert "ELLIE_MODEL" in README                          # works for the chat window too
+    assert "python ellie_chat.py <model>" in README
+    assert "[docs/models.md](docs/models.md)" in README
+    assert "`lfm3:1.7b-q4_K_M` (1.1 GB) is the lightweight alternative" in README
+
+
+def test_the_models_page_exists_and_matches_what_the_readme_promises():
+    page = (Path(__file__).resolve().parent.parent / "docs" / "models.md").read_text(encoding="utf-8")
+    for model in ("bonsai-2:4b", "lfm3:1.7b-q4_K_M", "bonsai-2:2b", "granite4.1:3b"):
+        assert f"`{model}`" in page
+    assert "ELLIE_MODEL" in page and "python ellie_chat.py <model>" in page
+    assert "LFM Open License v1.0" in page                  # the one license with a condition is stated, not hidden
 
 
 def test_there_is_a_system_requirements_subsection_under_requirements():

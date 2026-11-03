@@ -34,7 +34,20 @@ from ollama import chat
 import query_functions as qf
 
 DEFAULT_MODEL = "bonsai-2:4b"
-MODEL = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_MODEL
+
+
+def choose_model(argv=(), environ=None):
+    """The model to run: a name given on the command line (`python ellie_chat.py <model>`), else
+    the ELLIE_MODEL environment variable (which also works for the chat window), else the default."""
+    environ = os.environ if environ is None else environ
+    if len(argv) > 1 and argv[1].strip():
+        return argv[1].strip()
+    return (environ.get("ELLIE_MODEL") or "").strip() or DEFAULT_MODEL
+
+
+# At import only the environment counts: the command line belongs to whatever launched us (the
+# chat window, a test runner), so it is read in main(), when this file is the program.
+MODEL = choose_model()
 MAX_TOOL_ROUNDS = 5
 
 DEFAULT_NUM_CTX = 8192
@@ -372,6 +385,8 @@ def ask_ellie(user_message, history):
 
 
 def main():
+    global MODEL
+    MODEL = choose_model(sys.argv)
     print(f"Ellie is online, running {MODEL}. Ask about blueprints, materials, engineers, or your status. Type 'quit' to exit.")
     history = [{"role": "system", "content": SYSTEM_PROMPT}]
     while True:

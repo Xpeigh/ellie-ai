@@ -337,19 +337,47 @@ def test_results_are_compacted_when_the_model_loops_on_tool_calls(monkeypatch):
 
 # --- B6: the default model ----------------------------------------------------------------------------
 
-def test_the_default_model_is_bonsai(monkeypatch):
+def test_the_default_model_is_bonsai():
     assert ec.DEFAULT_MODEL == "bonsai-2:4b"
+    assert ec.choose_model((), {}) == "bonsai-2:4b"
+    assert ec.choose_model(["ellie_chat.py"], {}) == "bonsai-2:4b"
+
+
+def test_the_model_can_be_chosen_by_environment_or_command_line():
+    assert ec.choose_model((), {"ELLIE_MODEL": "lfm3:1.7b-q4_K_M"}) == "lfm3:1.7b-q4_K_M"
+    assert ec.choose_model(["ellie_chat.py"], {"ELLIE_MODEL": "  lfm3:1.7b-q4_K_M  "}) == "lfm3:1.7b-q4_K_M"
+    assert ec.choose_model(["ellie_chat.py", "granite4.1:3b"], {"ELLIE_MODEL": "lfm3:1.7b-q4_K_M"}) == "granite4.1:3b"   # the command line wins
+    assert ec.choose_model(["ellie_chat.py", "   "], {"ELLIE_MODEL": "lfm3:1.7b-q4_K_M"}) == "lfm3:1.7b-q4_K_M"          # blank is ignored
+    assert ec.choose_model((), {"ELLIE_MODEL": "   "}) == "bonsai-2:4b"
+
+
+def test_importing_never_reads_the_command_line_but_does_read_the_environment(monkeypatch):
+    """The chat window imports this module; whatever arguments launched the app must not become the model name."""
     original_argv = sys.argv
     try:
-        monkeypatch.setattr(sys, "argv", ["ellie_chat.py"])
+        monkeypatch.delenv("ELLIE_MODEL", raising=False)
+        monkeypatch.setattr(sys, "argv", ["app.py", "--port", "9999"])
         importlib.reload(ec)
         assert ec.MODEL == "bonsai-2:4b"
-        monkeypatch.setattr(sys, "argv", ["ellie_chat.py", "granite4.1:3b"])
+        monkeypatch.setenv("ELLIE_MODEL", "lfm3:1.7b-q4_K_M")
         importlib.reload(ec)
-        assert ec.MODEL == "granite4.1:3b"             # argv still overrides
+        assert ec.MODEL == "lfm3:1.7b-q4_K_M"
     finally:
         monkeypatch.setattr(sys, "argv", original_argv)
+        monkeypatch.delenv("ELLIE_MODEL", raising=False)
         importlib.reload(ec)
+
+
+def test_the_terminal_chat_reads_the_model_from_the_command_line(monkeypatch):
+    answers = iter(["quit"])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+    monkeypatch.setattr(sys, "argv", ["ellie_chat.py", "granite4.1:3b"])
+    original = ec.MODEL
+    try:
+        ec.main()
+        assert ec.MODEL == "granite4.1:3b"
+    finally:
+        ec.MODEL = original
 
 
 def test_ollama_is_pinned_to_a_version_that_accepts_think_and_options():
