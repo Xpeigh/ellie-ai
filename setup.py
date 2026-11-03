@@ -142,7 +142,7 @@ def check_ollama():
     if shutil.which("ollama") is None:
         print(f"The `ollama` command isn't on PATH -- pull it yourself: ollama pull {MODEL}")
         return False
-    if not _ask_yes_no(f"Pull it now ({MODEL} is a few GB)?"):
+    if not _ask_yes_no(f"Pull it now ({MODEL} is about 1.6 GB)?"):
         print(f"Skipped. Pull it yourself later with: ollama pull {MODEL}")
         return False
     result = subprocess.run(["ollama", "pull", MODEL])

@@ -102,3 +102,14 @@ def test_the_warning_is_only_for_the_default_model(monkeypatch, capsys):
     monkeypatch.setattr(setup_script, "MODEL", "granite4.1:3b")
     ok, out = run_check(monkeypatch, capsys, version="0.30.0", models=("granite4.1:3b",))
     assert ok is True and "needs Ollama" not in out
+
+
+def test_the_pull_prompt_states_the_real_download_size(monkeypatch, capsys):
+    """bonsai-2:4b is a 1.6 GB download, not "a few GB"."""
+    asked = []
+    monkeypatch.setattr(setup_script, "_ask_yes_no", lambda prompt, default=True: asked.append(prompt) or False)
+    monkeypatch.setattr(setup_script.shutil, "which", lambda name: "C:/ollama/ollama.exe")
+    monkeypatch.setitem(sys.modules, "requests", FakeRequests(version="0.40.13", models=()))
+    assert setup_script.check_ollama() is False                       # not pulled, and the commander said no
+    assert asked == ["Pull it now (bonsai-2:4b is about 1.6 GB)?"]
+    assert "few GB" not in asked[0]

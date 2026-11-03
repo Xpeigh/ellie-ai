@@ -2013,8 +2013,8 @@ def test_a_thruster_rated_below_the_loaded_mass_gets_a_note(tmp_path):
     full = 1122.0 - old_mass + new_mass + 64.0 + 348.0
     assert maxmass < full
     result = qf.simulate_module_swap("thrusters", 5, "E", variant="int_engine_size5_class1")
-    note = f"Thrusters is rated for ships up to {maxmass} t; fully loaded, your ship would weigh {round(full, 2)} t."
-    assert result["mass_note"] == note == "Thrusters is rated for ships up to 840 t; fully loaded, your ship would weigh 1474.0 t."
+    note = f"These thrusters are rated for ships up to {maxmass} t; fully loaded, your ship would weigh {round(full, 2)} t."
+    assert result["mass_note"] == note == "These thrusters are rated for ships up to 840 t; fully loaded, your ship would weigh 1474.0 t."
     assert result["summary"].endswith(f" Note: {note}")
     assert result["new_fuel_capacity"] == 64.0 and result["new_cargo_capacity"] == 348.0
 
@@ -2026,9 +2026,12 @@ def test_the_thruster_note_comes_after_the_capacity_note():
         "old_jump_range_now": None, "new_jump_range_now": None, "jump_range_change_now": None,
         "old_jump_range_max": None, "new_jump_range_max": None, "jump_range_change_max": None,
         "old_unladen_mass": None, "new_unladen_mass": None, "mass_change": None, "new_power_margin": None,
-        "capacity_note": "CAP", "mass_note": "Thrusters is rated for 1 t.", "state_note": None,
+        "capacity_note": "CAP", "mass_note": "These thrusters are rated for ships up to 1 t; fully loaded, your ship would weigh 2 t.",
+        "state_note": None,
     })
-    assert built == "S: adding y in X. Note: CAP. Note: Thrusters is rated for 1 t."
+    assert built == (
+        "S: adding y in X. Note: CAP. "
+        "Note: These thrusters are rated for ships up to 1 t; fully loaded, your ship would weigh 2 t.")
 
 
 def test_a_thruster_the_ship_does_not_outweigh_has_no_mass_note(tmp_path):

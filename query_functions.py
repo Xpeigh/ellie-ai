@@ -1585,7 +1585,6 @@ def _swap_summary(result):
     return summary
 
 
-@_needs_setup
 def _unset(value):
     """A small model's way of saying "not given": the strings 'None', 'null',
     'undefined' or an empty one (llama3.2 passed slot="None"). A real slot,
@@ -1595,6 +1594,7 @@ def _unset(value):
     return value
 
 
+@_needs_setup
 def simulate_module_swap(module_group: str, module_class: int, module_rating: str,
                           blueprint_name: str = None, grade: int = None, slot: str = None,
                           variant: str = None) -> dict:
@@ -1906,7 +1906,7 @@ def simulate_module_swap(module_group: str, module_class: int, module_rating: st
                 fully_loaded = new_unladen_max + new_fuel_capacity + new_cargo_capacity
                 if fully_loaded > maxmass:
                     mass_note = (
-                        f"{_module_display_name(new_module)} is rated for ships up to {round(maxmass, 2)} t; "
+                        f"These thrusters are rated for ships up to {round(maxmass, 2)} t; "
                         f"fully loaded, your ship would weigh {round(fully_loaded, 2)} t."
                     )
 

@@ -355,3 +355,108 @@ def test_the_default_model_is_bonsai(monkeypatch):
 def test_ollama_is_pinned_to_a_version_that_accepts_think_and_options():
     lines = (Path(__file__).resolve().parent.parent / "requirements.txt").read_text().split()
     assert "ollama>=0.6.0" in lines
+
+
+# --- Task 10c: a "which variant?" reply is compacted to its options, not cut at 400 characters ---------------
+
+def variants_result(count=4, name_length=20):
+    variants = [
+        {"symbol": f"int_hyperdrive_variant{i}_size6_class5", "name": ("N" * name_length) + str(i), "mount": None}
+        for i in range(1, count + 1)
+    ]
+    return {
+        "found": False,
+        "reason": f"{count} different modules are frame shift drive class 6 rating A -- specify which with `variant`",
+        "variants": variants,
+    }
+
+
+def test_a_variants_reply_keeps_every_option_when_compacted(monkeypatch):
+    result = variants_result(4)
+    assert len(json.dumps(result)) > 400 and "variant4" not in json.dumps(result)[:400]     # the old cut lost the tail
+    fake = FakeChat(tool_call(name="simulate_module_swap", module_group="frame shift drive"), answer("Which one?"))
+    monkeypatch.setattr(ec, "chat", fake)
+    monkeypatch.setattr(ec, "call_tool", lambda name, args: result)
+    _, history = ec.ask_ellie("fit a class 6 A drive", fresh_history())
+    stored = [m for m in history if isinstance(m, dict) and m["role"] == "tool"][0]["content"]
+    assert stored == PREFIX + result["reason"] + " Options: " + ", ".join(
+        f"{v['name']} ({v['symbol']})" for v in result["variants"])
+    for variant in result["variants"]:
+        assert variant["symbol"] in stored
+
+
+def test_a_follow_up_after_a_variants_reply_still_runs_and_sees_the_options(monkeypatch):
+    result = variants_result(5, name_length=30)
+    assert "variant5" not in json.dumps(result)[:400]               # the old cut would have lost the last options
+    fake = FakeChat(tool_call(name="simulate_module_swap"), answer("Which one?"), answer("The SCO one it is."))
+    monkeypatch.setattr(ec, "chat", fake)
+    monkeypatch.setattr(ec, "call_tool", lambda name, args: result)
+    _, history = ec.ask_ellie("fit a class 6 A drive", fresh_history())
+    reply, history = ec.ask_ellie("the SCO one", history)
+    assert reply == "The SCO one it is."
+    seen = [m["content"] for m in fake.calls[2]["messages"] if isinstance(m, dict) and m["role"] == "tool"][0]
+    assert all(v["symbol"] in seen for v in result["variants"])
+
+
+def test_at_most_six_options_are_kept(monkeypatch):
+    result = variants_result(8, name_length=5)
+    fake = FakeChat(tool_call(name="simulate_module_swap"), answer("ok"))
+    monkeypatch.setattr(ec, "chat", fake)
+    monkeypatch.setattr(ec, "call_tool", lambda name, args: result)
+    _, history = ec.ask_ellie("q", fresh_history())
+    stored = [m for m in history if isinstance(m, dict) and m["role"] == "tool"][0]["content"]
+    assert stored.count("int_hyperdrive_variant") == 6
+    assert "variant6_" in stored and "variant7_" not in stored
+
+
+def test_each_option_is_at_most_60_characters_and_keeps_its_symbol(monkeypatch):
+    long_name = {"symbol": "int_hyperdrive_a_size6_class5", "name": "A very long module name " * 4, "mount": None}
+    fake = FakeChat(tool_call(name="simulate_module_swap"), answer("ok"))
+    monkeypatch.setattr(ec, "chat", fake)
+    monkeypatch.setattr(ec, "call_tool", lambda name, args: {"reason": "R", "variants": [long_name]})
+    _, history = ec.ask_ellie("q", fresh_history())
+    stored = [m for m in history if isinstance(m, dict) and m["role"] == "tool"][0]["content"]
+    entry = stored[len(PREFIX + "R Options: "):]
+    assert len(entry) <= 60 and entry.endswith("(int_hyperdrive_a_size6_class5)")
+    assert entry == "A very long module name A... (int_hyperdrive_a_size6_class5)"
+    assert len(entry) == 60                                          # the label gave up exactly the room it had to
+
+
+def test_the_option_label_falls_back_to_the_mount_then_to_the_symbol_alone():
+    options = ec._variant_options([
+        {"symbol": "hpt_beamlaser_fixed_small", "name": None, "mount": "fixed"},
+        {"symbol": "hpt_beamlaser_gimbal_small", "name": None, "mount": None},
+        {"symbol": "int_hyperdrive_overcharge_size8_class5_overchargebooster_mkii", "name": "Frame Shift Drive Mk II (SCO)", "mount": None},
+    ])
+    assert options == [
+        "fixed (hpt_beamlaser_fixed_small)",
+        "hpt_beamlaser_gimbal_small",
+        # the longest real symbol is 61 characters: the symbol is what a follow-up needs, so it stays whole
+        "int_hyperdrive_overcharge_size8_class5_overchargebooster_mkii",
+    ]
+
+
+def test_a_variants_reply_with_no_reason_still_compacts(monkeypatch):
+    fake = FakeChat(tool_call(name="simulate_module_swap"), answer("ok"))
+    monkeypatch.setattr(ec, "chat", fake)
+    monkeypatch.setattr(ec, "call_tool", lambda name, args: {"variants": [{"symbol": "s1", "name": "One", "mount": None}]})
+    _, history = ec.ask_ellie("q", fresh_history())
+    assert [m for m in history if isinstance(m, dict) and m["role"] == "tool"][0]["content"] == PREFIX + "Options: One (s1)"
+
+
+def test_a_summary_still_wins_over_variants_and_other_results_keep_the_400_cut(monkeypatch):
+    fake = FakeChat(tool_call(name="a"), answer("ok"), tool_call(name="b"), answer("ok"), tool_call(name="c"), answer("ok"))
+    monkeypatch.setattr(ec, "chat", fake)
+    results = iter([
+        {"summary": "THE SUMMARY", "variants": [{"symbol": "s", "name": "n", "mount": None}]},
+        {"variants": []},                                    # empty list: nothing to list
+        {"rows": ["x" * 50 for _ in range(30)]},
+    ])
+    monkeypatch.setattr(ec, "call_tool", lambda name, args: next(results))
+    history = fresh_history()
+    for question in ("q1", "q2", "q3"):
+        _, history = ec.ask_ellie(question, history)
+    stored = [m["content"] for m in history if isinstance(m, dict) and m["role"] == "tool"]
+    assert stored[0] == PREFIX + "THE SUMMARY"
+    assert stored[1] == PREFIX + '{"variants": []}'
+    assert stored[2] == PREFIX + json.dumps({"rows": ["x" * 50 for _ in range(30)]})[:400]

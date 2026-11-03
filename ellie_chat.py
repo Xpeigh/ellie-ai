@@ -53,6 +53,8 @@ NUM_CTX = _parse_num_ctx(os.environ.get("ELLIE_NUM_CTX"))
 
 EMPTY_ANSWER_FALLBACK = "I couldn't produce an answer that time. Please ask again, or try a shorter question."
 STALE_PREFIX = "[earlier result, may be out of date] "
+MAX_OPTIONS = 6                # variants kept when a "which one?" reply is compacted
+MAX_OPTION_CHARS = 60
 CHARS_PER_TOKEN = 3.3          # measured on this project's prompts; deliberately on the cautious side
 PROMPT_BUDGET = 0.75           # of the window; the rest is for the answer
 
@@ -278,17 +280,49 @@ def _chat(messages):
     )
 
 
+def _variant_options(variants):
+    """'Name (symbol)' for each of the first MAX_OPTIONS variants, each at most
+    MAX_OPTION_CHARS long. The symbol is what a follow-up ("the SCO one") has to
+    pass back, so it is never cut: a long name is shortened to make room, and
+    when there is no room the symbol stands alone (the longest real one is 61
+    characters, over the cap by itself). A variant with no name falls back to
+    its mount word."""
+    options = []
+    for variant in variants[:MAX_OPTIONS]:
+        symbol = str(variant.get("symbol") or "")
+        label = variant.get("name") or variant.get("mount")
+        if not label:
+            options.append(symbol)
+            continue
+        option = f"{label} ({symbol})"
+        if len(option) > MAX_OPTION_CHARS:
+            room = MAX_OPTION_CHARS - len(f" ({symbol})")
+            option = f"{str(label)[:room - 3]}... ({symbol})" if room >= 4 else symbol
+        options.append(option)
+    return options
+
+
+def _compact_text(result):
+    """What a finished turn's tool result is shrunk to: its summary; or, for a
+    "which one?" reply (a `variants` list and no summary), the reason and ALL
+    the options, because cutting the JSON at 400 characters could drop the
+    tail of the list and a follow-up could no longer see every choice; else the
+    first 400 characters of its JSON."""
+    if isinstance(result, dict) and result.get("summary"):
+        return str(result["summary"])
+    if isinstance(result, dict) and result.get("variants"):
+        reason = str(result.get("reason") or "")
+        return (reason + " " if reason else "") + "Options: " + ", ".join(_variant_options(result["variants"]))
+    return json.dumps(result)[:400]
+
+
 def _compact_tool_results(history, produced):
-    """Once a turn is over, shrink each tool result it produced to its summary
-    (else the first 400 characters of its JSON), marked as possibly stale: a
-    follow-up like "and with grade 5 instead?" still has the numbers, but an
-    old fuel or cargo figure is no longer presented as current and the history
-    stops filling the window."""
+    """Once a turn is over, shrink each tool result it produced (see
+    _compact_text) and mark it as possibly stale: a follow-up like "and with
+    grade 5 instead?" still has the numbers, but an old fuel or cargo figure is
+    no longer presented as current and the history stops filling the window."""
     for message, result in produced:
-        if isinstance(result, dict) and result.get("summary"):
-            text = str(result["summary"])
-        else:
-            text = json.dumps(result)[:400]
+        text = _compact_text(result)
         compact = {"role": "tool", "tool_name": message["tool_name"], "content": STALE_PREFIX + text}
         for i, kept in enumerate(history):
             if kept is message:
