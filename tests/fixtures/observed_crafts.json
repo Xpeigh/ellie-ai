@@ -1,0 +1,532 @@
+{
+ "experimental_crafts": [
+  {
+   "crafts": 1,
+   "effect": "special_drag_munitions",
+   "ingredients": {
+    "Grid Resistors": 5,
+    "carbon": 5,
+    "molybdenum": 2
+   }
+  },
+  {
+   "crafts": 1,
+   "effect": "special_engine_lightweight",
+   "ingredients": {
+    "Hybrid Capacitors": 3,
+    "Proto Light Alloys": 1,
+    "iron": 5
+   }
+  },
+  {
+   "crafts": 1,
+   "effect": "special_fsd_heavy",
+   "ingredients": {
+    "Atypical Disrupted Wake Echoes": 5,
+    "Eccentric Hyperspace Trajectories": 1,
+    "Galvanising Alloys": 3
+   }
+  },
+  {
+   "crafts": 2,
+   "effect": "special_powerdistributor_lightweight",
+   "ingredients": {
+    "Heat Resistant Ceramics": 3,
+    "Proto Light Alloys": 1,
+    "phosphorus": 5
+   }
+  },
+  {
+   "crafts": 1,
+   "effect": "special_powerplant_cooled",
+   "ingredients": {
+    "Grid Resistors": 5,
+    "Heat Vanes": 1,
+    "vanadium": 3
+   }
+  },
+  {
+   "crafts": 1,
+   "effect": "special_scramble_spectrum",
+   "ingredients": {
+    "Crystal Shards": 5,
+    "Exceptional Scrambled Emission Data": 5,
+    "Untypical Shield Scans": 3
+   }
+  },
+  {
+   "crafts": 1,
+   "effect": "special_shield_lightweight",
+   "ingredients": {
+    "Flawed Focus Crystals": 3,
+    "Proto Light Alloys": 1,
+    "Worn Shield Emitters": 5
+   }
+  },
+  {
+   "crafts": 1,
+   "effect": "special_thermal_cascade",
+   "ingredients": {
+    "Heat Conduction Wiring": 5,
+    "High Density Composites": 3,
+    "Hybrid Capacitors": 4,
+    "phosphorus": 5
+   }
+  },
+  {
+   "crafts": 2,
+   "effect": "special_weapon_lightweight",
+   "ingredients": {
+    "Salvaged Alloys": 5,
+    "carbon": 5,
+    "tin": 1
+   }
+  }
+ ],
+ "grade_crafts": [
+  {
+   "blueprint": "Armour_Advanced",
+   "crafts": 3,
+   "grade": 1,
+   "ingredients": {
+    "iron": 1
+   }
+  },
+  {
+   "blueprint": "Engine_Dirty",
+   "crafts": 1,
+   "grade": 1,
+   "ingredients": {
+    "Specialised Legacy Firmware": 1
+   }
+  },
+  {
+   "blueprint": "Engine_Dirty",
+   "crafts": 2,
+   "grade": 2,
+   "ingredients": {
+    "Mechanical Equipment": 1,
+    "Specialised Legacy Firmware": 1
+   }
+  },
+  {
+   "blueprint": "Engine_Dirty",
+   "crafts": 3,
+   "grade": 3,
+   "ingredients": {
+    "Mechanical Components": 1,
+    "Specialised Legacy Firmware": 1,
+    "chromium": 1
+   }
+  },
+  {
+   "blueprint": "FSD_LongRange",
+   "crafts": 11,
+   "grade": 1,
+   "ingredients": {
+    "Atypical Disrupted Wake Echoes": 1
+   }
+  },
+  {
+   "blueprint": "FSD_LongRange",
+   "crafts": 11,
+   "grade": 2,
+   "ingredients": {
+    "Atypical Disrupted Wake Echoes": 1,
+    "Chemical Processors": 1
+   }
+  },
+  {
+   "blueprint": "FSD_LongRange",
+   "crafts": 5,
+   "grade": 3,
+   "ingredients": {
+    "Chemical Processors": 1,
+    "Strange Wake Solutions": 1,
+    "phosphorus": 1
+   }
+  },
+  {
+   "blueprint": "FSD_LongRange",
+   "crafts": 4,
+   "grade": 4,
+   "ingredients": {
+    "Chemical Distillery": 1,
+    "Eccentric Hyperspace Trajectories": 1,
+    "manganese": 1
+   }
+  },
+  {
+   "blueprint": "FSD_LongRange",
+   "crafts": 5,
+   "grade": 5,
+   "ingredients": {
+    "Chemical Manipulators": 1,
+    "Datamined Wake Exceptions": 1,
+    "arsenic": 1
+   }
+  },
+  {
+   "blueprint": "PowerDistributor_HighCapacity",
+   "crafts": 5,
+   "grade": 1,
+   "ingredients": {
+    "sulphur": 1
+   }
+  },
+  {
+   "blueprint": "PowerDistributor_HighCapacity",
+   "crafts": 3,
+   "grade": 2,
+   "ingredients": {
+    "Specialised Legacy Firmware": 1,
+    "chromium": 1
+   }
+  },
+  {
+   "blueprint": "PowerDistributor_PriorityEngines",
+   "crafts": 4,
+   "grade": 1,
+   "ingredients": {
+    "sulphur": 1
+   }
+  },
+  {
+   "blueprint": "PowerDistributor_PriorityEngines",
+   "crafts": 6,
+   "grade": 2,
+   "ingredients": {
+    "Conductive Components": 1,
+    "sulphur": 1
+   }
+  },
+  {
+   "blueprint": "PowerDistributor_PriorityEngines",
+   "crafts": 7,
+   "grade": 3,
+   "ingredients": {
+    "Anomalous Bulk Scan Data": 1,
+    "Electrochemical Arrays": 1,
+    "chromium": 1
+   }
+  },
+  {
+   "blueprint": "PowerDistributor_PriorityEngines",
+   "crafts": 8,
+   "grade": 4,
+   "ingredients": {
+    "Polymer Capacitors": 1,
+    "Unidentified Scan Archives": 1,
+    "selenium": 1
+   }
+  },
+  {
+   "blueprint": "PowerDistributor_PriorityEngines",
+   "crafts": 10,
+   "grade": 5,
+   "ingredients": {
+    "Classified Scan Databanks": 1,
+    "Military Supercapacitors": 1,
+    "cadmium": 1
+   }
+  },
+  {
+   "blueprint": "PowerPlant_Boosted",
+   "crafts": 4,
+   "grade": 1,
+   "ingredients": {
+    "sulphur": 1
+   }
+  },
+  {
+   "blueprint": "PowerPlant_Stealth",
+   "crafts": 8,
+   "grade": 1,
+   "ingredients": {
+    "iron": 1
+   }
+  },
+  {
+   "blueprint": "PowerPlant_Stealth",
+   "crafts": 8,
+   "grade": 2,
+   "ingredients": {
+    "Irregular Emission Data": 1,
+    "iron": 1
+   }
+  },
+  {
+   "blueprint": "PowerPlant_Stealth",
+   "crafts": 7,
+   "grade": 3,
+   "ingredients": {
+    "Heat Exchangers": 1,
+    "Irregular Emission Data": 1,
+    "iron": 1
+   }
+  },
+  {
+   "blueprint": "PowerPlant_Stealth",
+   "crafts": 8,
+   "grade": 4,
+   "ingredients": {
+    "Heat Vanes": 1,
+    "Unexpected Emission Data": 1,
+    "germanium": 1
+   }
+  },
+  {
+   "blueprint": "PowerPlant_Stealth",
+   "crafts": 10,
+   "grade": 5,
+   "ingredients": {
+    "Decoded Emission Data": 1,
+    "Proto Heat Radiators": 1,
+    "niobium": 1
+   }
+  },
+  {
+   "blueprint": "Sensor_Expanded",
+   "crafts": 1,
+   "grade": 1,
+   "ingredients": {
+    "Mechanical Scrap": 1
+   }
+  },
+  {
+   "blueprint": "Sensor_Expanded",
+   "crafts": 2,
+   "grade": 2,
+   "ingredients": {
+    "Mechanical Scrap": 1,
+    "germanium": 1
+   }
+  },
+  {
+   "blueprint": "Sensor_Expanded",
+   "crafts": 3,
+   "grade": 3,
+   "ingredients": {
+    "Mechanical Scrap": 1,
+    "Phase Alloys": 1,
+    "germanium": 1
+   }
+  },
+  {
+   "blueprint": "Sensor_Expanded",
+   "crafts": 4,
+   "grade": 4,
+   "ingredients": {
+    "Mechanical Equipment": 1,
+    "Proto Light Alloys": 1,
+    "niobium": 1
+   }
+  },
+  {
+   "blueprint": "Sensor_Expanded",
+   "crafts": 5,
+   "grade": 5,
+   "ingredients": {
+    "Mechanical Components": 1,
+    "Proto Radiolic Alloys": 1,
+    "tin": 1
+   }
+  },
+  {
+   "blueprint": "Sensor_LightWeight",
+   "crafts": 4,
+   "grade": 1,
+   "ingredients": {
+    "phosphorus": 1
+   }
+  },
+  {
+   "blueprint": "Sensor_LightWeight",
+   "crafts": 2,
+   "grade": 2,
+   "ingredients": {
+    "Salvaged Alloys": 1,
+    "manganese": 1
+   }
+  },
+  {
+   "blueprint": "Sensor_LightWeight",
+   "crafts": 3,
+   "grade": 3,
+   "ingredients": {
+    "Conductive Ceramics": 1,
+    "Salvaged Alloys": 1,
+    "manganese": 1
+   }
+  },
+  {
+   "blueprint": "Sensor_LightWeight",
+   "crafts": 4,
+   "grade": 4,
+   "ingredients": {
+    "Conductive Components": 1,
+    "Phase Alloys": 1,
+    "Proto Light Alloys": 1
+   }
+  },
+  {
+   "blueprint": "Sensor_LightWeight",
+   "crafts": 5,
+   "grade": 5,
+   "ingredients": {
+    "Conductive Ceramics": 1,
+    "Proto Light Alloys": 1,
+    "Proto Radiolic Alloys": 1
+   }
+  },
+  {
+   "blueprint": "ShieldGenerator_Optimised",
+   "crafts": 4,
+   "grade": 1,
+   "ingredients": {
+    "Distorted Shield Cycle Recordings": 1
+   }
+  },
+  {
+   "blueprint": "ShieldGenerator_Optimised",
+   "crafts": 4,
+   "grade": 2,
+   "ingredients": {
+    "Distorted Shield Cycle Recordings": 1,
+    "germanium": 1
+   }
+  },
+  {
+   "blueprint": "ShieldGenerator_Optimised",
+   "crafts": 4,
+   "grade": 3,
+   "ingredients": {
+    "Distorted Shield Cycle Recordings": 1,
+    "Precipitated Alloys": 1,
+    "germanium": 1
+   }
+  },
+  {
+   "blueprint": "ShieldGenerator_Optimised",
+   "crafts": 4,
+   "grade": 4,
+   "ingredients": {
+    "Inconsistent Shield Soak Analysis": 1,
+    "Thermic Alloys": 1,
+    "niobium": 1
+   }
+  },
+  {
+   "blueprint": "ShieldGenerator_Optimised",
+   "crafts": 5,
+   "grade": 5,
+   "ingredients": {
+    "Military Grade Alloys": 1,
+    "Untypical Shield Scans": 1,
+    "tin": 1
+   }
+  },
+  {
+   "blueprint": "Weapon_HighCapacity",
+   "crafts": 5,
+   "grade": 1,
+   "ingredients": {
+    "Mechanical Scrap": 1
+   }
+  },
+  {
+   "blueprint": "Weapon_HighCapacity",
+   "crafts": 6,
+   "grade": 2,
+   "ingredients": {
+    "Mechanical Scrap": 1,
+    "vanadium": 1
+   }
+  },
+  {
+   "blueprint": "Weapon_HighCapacity",
+   "crafts": 7,
+   "grade": 3,
+   "ingredients": {
+    "Mechanical Scrap": 1,
+    "niobium": 1,
+    "vanadium": 1
+   }
+  },
+  {
+   "blueprint": "Weapon_HighCapacity",
+   "crafts": 8,
+   "grade": 4,
+   "ingredients": {
+    "High Density Composites": 1,
+    "Mechanical Equipment": 1,
+    "tin": 1
+   }
+  },
+  {
+   "blueprint": "Weapon_HighCapacity",
+   "crafts": 10,
+   "grade": 5,
+   "ingredients": {
+    "Mechanical Components": 1,
+    "Military Supercapacitors": 1,
+    "Proprietary Composites": 1
+   }
+  },
+  {
+   "blueprint": "Weapon_RapidFire",
+   "crafts": 5,
+   "grade": 1,
+   "ingredients": {
+    "Mechanical Scrap": 1
+   }
+  },
+  {
+   "blueprint": "Weapon_RapidFire",
+   "crafts": 4,
+   "grade": 2,
+   "ingredients": {
+    "Heat Dispersion Plate": 1,
+    "Mechanical Scrap": 1
+   }
+  },
+  {
+   "blueprint": "Weapon_RapidFire",
+   "crafts": 4,
+   "grade": 3,
+   "ingredients": {
+    "Mechanical Equipment": 1,
+    "Precipitated Alloys": 1,
+    "Specialised Legacy Firmware": 1
+   }
+  },
+  {
+   "blueprint": "Weapon_RapidFire",
+   "crafts": 4,
+   "grade": 4,
+   "ingredients": {
+    "Mechanical Components": 1,
+    "Modified Consumer Firmware": 1,
+    "Thermic Alloys": 1
+   }
+  },
+  {
+   "blueprint": "Weapon_RapidFire",
+   "crafts": 5,
+   "grade": 5,
+   "ingredients": {
+    "Configurable Components": 1,
+    "Precipitated Alloys": 1,
+    "technetium": 1
+   }
+  },
+  {
+   "blueprint": "Weapon_ShortRange",
+   "crafts": 1,
+   "grade": 1,
+   "ingredients": {
+    "nickel": 1
+   }
+  }
+ ]
+}
