@@ -498,7 +498,7 @@ def missing_materials(module_name: str, upgrade_name: str, grade: int) -> dict:
 
     label = f"{blueprint['module']}, {blueprint['upgrade']}, grade {blueprint['grade']}"
     if have_enough:
-        summary = f"You have everything for {label} (per roll)."
+        summary = f"You have everything for {label} (per roll): " + ", ".join(f"{qty} {name}" for name, qty in required.items()) + "."
     else:
         summary = (f"For {label} (per roll) you need " + ", ".join(f"{qty} {name}" for name, qty in required.items())
                    + ". You are short by: "

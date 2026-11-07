@@ -245,7 +245,7 @@ def test_missing_materials_sees_what_the_commander_holds_under_the_game_s_name(c
     _hold(coriolis_db, "disruptedwakeechoes", "Atypical Disrupted Wake Echoes", 64)       # the bug: this used to read as 0
     r = qf.missing_materials("Frame Shift Drive", "Increased range", 1)
     assert r["found"] is True and r["have_everything"] is True and r["missing"] == {}
-    assert r["summary"] == "You have everything for Frame Shift Drive, Increased range, grade 1 (per roll)."
+    assert r["summary"] == "You have everything for Frame Shift Drive, Increased range, grade 1 (per roll): 1 Atypical Disrupted Wake Echoes."
 
 
 def test_missing_materials_names_what_is_short_and_how_much(coriolis_db):
