@@ -395,24 +395,30 @@ def _material_key(name):
 
 @_needs_setup
 def missing_materials(module_name: str, upgrade_name: str, grade: int) -> dict:
-    """Diffs a blueprint's requirement against what's actually on hand
+    """Diffs ONE roll of a blueprint's requirement against what's actually on hand
     right now (materials_inventory, kept current by journal_watcher.py)."""
-    grade = int(grade)
     blueprint = get_blueprint(module_name, upgrade_name, grade)
     if not blueprint["found"]:
-        result = {"found": False, "module": module_name, "upgrade": upgrade_name, "grade": grade}
-        if "reason" in blueprint:  # e.g. the database isn't set up -- don't let that read as "no such blueprint"
-            result["reason"] = blueprint["reason"]
+        result = {"found": False, "module": blueprint.get("module", module_name),
+                  "upgrade": blueprint.get("upgrade", upgrade_name), "grade": blueprint.get("grade", grade)}
+        for key in ("reason", "available_upgrades", "available_grades"):
+            if key in blueprint:
+                result[key] = blueprint[key]
         return result
+
+    required = blueprint["materials"]
+    shared = {"found": True, "module": blueprint["module"], "upgrade": blueprint["upgrade"], "grade": blueprint["grade"],
+              "cost_known": blueprint["cost_known"], "required": required, "source": blueprint["source"], "materials_per": "roll"}
+    if "other_requirements" in blueprint:
+        shared["other_requirements"] = blueprint["other_requirements"]
+    if not required:
+        return {**shared, "have_everything": None, "missing": {}, "summary": blueprint["summary"]}
 
     conn = _connect()
     missing, have_enough = {}, True
     try:
-        for material, needed_qty in blueprint["materials"].items():
-            row = conn.execute(
-                "SELECT count FROM materials_inventory WHERE material_name = ?",
-                (_material_key(material),),
-            ).fetchone()
+        for material, needed_qty in required.items():
+            row = _held_count(conn, material)
             on_hand = row["count"] if row else 0
             if on_hand < needed_qty:
                 missing[material] = {"need": needed_qty, "have": on_hand, "short_by": needed_qty - on_hand}
@@ -420,16 +426,15 @@ def missing_materials(module_name: str, upgrade_name: str, grade: int) -> dict:
     finally:
         conn.close()
 
-    return {
-        "found": True,
-        "module": module_name,
-        "upgrade": upgrade_name,
-        "grade": grade,
-        "have_everything": have_enough,
-        "missing": missing,
-        "required": blueprint["materials"],
-        "source": blueprint["source"],
-    }
+    label = f"{blueprint['module']}, {blueprint['upgrade']}, grade {blueprint['grade']}"
+    if have_enough:
+        summary = f"You have everything for {label} (per roll)."
+    else:
+        summary = (f"For {label} (per roll) you are short by: "
+                   + ", ".join(f"{m['short_by']} {name} (have {m['have']})" for name, m in missing.items()) + ".")
+    if shared.get("other_requirements"):
+        summary += f" Also listed: {', '.join(shared['other_requirements'])}."
+    return {**shared, "have_everything": have_enough, "missing": missing, "summary": summary}
 
 
 @_needs_setup
@@ -562,6 +567,21 @@ def _player_state() -> dict:
     return {"status": status, "materials_summary": materials_summary}
 
 
+def _held_count(conn, name):
+    """The materials_inventory row for a material, found by the key the journal stored
+    ('disruptedwakeechoes') OR by the name the game shows ('Atypical Disrupted Wake
+    Echoes'); the stored key wins if both match. None when the commander has never held it."""
+    key = _material_key(name)
+    if not key:
+        return None
+    return conn.execute(
+        "SELECT material_name, display_name, category, count FROM materials_inventory "
+        "WHERE material_name = ? OR replace(replace(lower(display_name), ' ', ''), '-', '') = ? "
+        "ORDER BY (material_name = ?) DESC LIMIT 1",
+        (key, key, key),
+    ).fetchone()
+
+
 @_needs_setup
 def get_material_count(material_name: str) -> dict:
     """Exact on-hand count for ONE specific material, by exact name. Use
@@ -569,10 +589,7 @@ def get_material_count(material_name: str) -> dict:
     player_state()'s summary."""
     conn = _connect()
     try:
-        row = conn.execute(
-            "SELECT display_name, category, count FROM materials_inventory WHERE material_name = ?",
-            (_material_key(material_name),),
-        ).fetchone()
+        row = _held_count(conn, material_name)
     finally:
         conn.close()
     if not row:

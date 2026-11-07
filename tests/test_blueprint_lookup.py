@@ -228,3 +228,40 @@ def test_a_database_from_before_this_change_gets_the_setup_message(coriolis_db):
     conn.close()
     r = qf.get_blueprint("Frame Shift Drive", "Increased range", 5)
     assert r["found"] is False and "python setup.py" in r["reason"]
+
+
+def _hold(path, key, shown, count, category="Encoded"):
+    conn = sqlite3.connect(path)
+    conn.execute("INSERT OR REPLACE INTO materials_inventory VALUES (?,?,?,?,?)", (key, category, shown, count, "2026-11-06T00:00:00Z"))
+    conn.commit()
+    conn.close()
+
+
+def test_missing_materials_sees_what_the_commander_holds_under_the_game_s_name(coriolis_db):
+    _hold(coriolis_db, "disruptedwakeechoes", "Atypical Disrupted Wake Echoes", 64)       # the bug: this used to read as 0
+    r = qf.missing_materials("Frame Shift Drive", "Increased range", 1)
+    assert r["found"] is True and r["have_everything"] is True and r["missing"] == {}
+    assert r["summary"] == "You have everything for Frame Shift Drive, Increased range, grade 1 (per roll)."
+
+
+def test_missing_materials_names_what_is_short_and_how_much(coriolis_db):
+    _hold(coriolis_db, "chemicalprocessors", "Chemical Processors", 0, "Manufactured")
+    r = qf.missing_materials("Frame Shift Drive", "Increased range", 2)               # 1 Atypical Disrupted Wake Echoes + 1 Chemical Processors
+    assert r["have_everything"] is False
+    assert r["missing"] == {"Atypical Disrupted Wake Echoes": {"need": 1, "have": 0, "short_by": 1},
+                            "Chemical Processors": {"need": 1, "have": 0, "short_by": 1}}
+    assert r["summary"] == ("For Frame Shift Drive, Increased range, grade 2 (per roll) you are short by: "
+                            "1 Atypical Disrupted Wake Echoes (have 0), 1 Chemical Processors (have 0).")
+
+
+def test_missing_materials_does_not_call_an_unrecorded_cost_nothing_missing(coriolis_db):
+    r = qf.missing_materials("Cargo Rack", "Expanded Capacity", 5)
+    assert r["found"] is True and r["cost_known"] is False and r["have_everything"] is None and r["missing"] == {}
+    assert "no materials are recorded" in r["summary"]
+
+
+def test_missing_materials_carries_a_blueprint_miss_through(coriolis_db):
+    r = qf.missing_materials("Frame Shift Drive", "Turbo", 2)
+    assert r["found"] is False and r["available_upgrades"] == ["Faster boot sequence", "Increased range", "Shielded"]
+    assert r["module"] == "Frame Shift Drive" and r["upgrade"] == "Turbo" and r["grade"] == 2
+    assert qf.missing_materials("Frame Shift Drive", "Increased range", "five")["reason"] == "The grade must be a number from 1 to 5."
