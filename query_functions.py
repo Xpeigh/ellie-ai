@@ -19,6 +19,7 @@ import sqlite3
 from pathlib import Path
 
 from blueprint_mapping import MODULE_TO_CORIOLIS_KEYWORDS
+from blueprint_mapping import BLUEPRINT_ALIASES, GROUP_SYNONYMS, clean_material_name, name_tokens, squash
 from loadout_calc import compute_jump_range, compute_current_jump_range, apply_blueprint_delta
 
 DB_PATH = str(Path(__file__).resolve().parent / "elite-dangerous.db")
@@ -138,6 +139,28 @@ def _needs_setup(func):
                 raise
             return {"found": False, "reason": f"Ellie's database isn't fully set up yet ({e}). Run `python setup.py`."}
     return wrapper
+
+
+def _resolve_module_groups(conn, typed):
+    """The group code(s) a typed module name means, sorted; [] when blank or unknown.
+    Looked up, in order, in: the group names built from the module files, the synonym
+    table, the friendly names the swap simulator uses, then a raw group code.
+    Case, spaces and hyphens do not matter."""
+    text = str(typed or "").strip().lower()
+    key = squash(text)
+    if not key:
+        return []
+    names = conn.execute("SELECT grp, name FROM module_group_names").fetchall()
+    hits = sorted({r["grp"] for r in names if squash(r["name"]) == key})
+    if hits:
+        return hits
+    synonyms = sorted({grp for name, grp in GROUP_SYNONYMS.items() if squash(name) == key})
+    if synonyms:
+        return synonyms
+    if text in MODULE_GROUP_TO_GRP:
+        return [MODULE_GROUP_TO_GRP[text]]
+    known = {r["grp"] for r in names} | set(MODULE_GROUP_TO_GRP.values())
+    return [key] if key in known else []
 
 
 def _materials_to_dict(materials_json):
@@ -1149,10 +1172,16 @@ def _blueprint_name_matches(rows, name):
       3. that name without its first 'Module_' segment, underscores ignored
          ('LongRange', 'long_range');
       4. the display name with spaces, hyphens, underscores and punctuation
-         removed ('increased-range', 'IncreasedRange').
+         removed ('increased-range', 'IncreasedRange');
+      5. an in-game alias from blueprint_mapping.BLUEPRINT_ALIASES;
+      6. every word of the display name, or of the part of the fdname after the
+         underscore, appears among the typed words ('Increased FSD Range' for
+         'Increased range'); the matches with the MOST words win.
     Returns every row the winning rule matched (the caller refuses an
-    ambiguous result rather than picking one)."""
+    ambiguous result rather than picking one). A blank name matches nothing."""
     raw = name.strip().lower()
+    if not raw:
+        return []
     squashed = re.sub(r"[\W_]+", "", raw)
 
     def tail(fdname):
@@ -1163,12 +1192,24 @@ def _blueprint_name_matches(rows, name):
         lambda r: r["fdname"].lower() == raw,
         lambda r: tail(r["fdname"]) is not None and tail(r["fdname"]).lower().replace("_", "") == raw.replace("_", ""),
         lambda r: bool(squashed) and re.sub(r"[\W_]+", "", r["upgrade_name"].lower()) == squashed,
+        lambda r: any(squash(alias) == squashed for alias in BLUEPRINT_ALIASES.get(r["fdname"], ())),
     )
     for rule in rules:
         hits = [r for r in rows if rule(r)]
         if hits:
             return hits
-    return []
+
+    typed = name_tokens(name)
+    scored = []
+    for r in rows:
+        sizes = [len(words) for words in (name_tokens(r["upgrade_name"]), name_tokens(tail(r["fdname"]) or ""))
+                 if words and words <= typed]
+        if sizes:
+            scored.append((max(sizes), r))
+    if not scored:
+        return []
+    best = max(size for size, _ in scored)
+    return [r for size, r in scored if size == best]
 
 
 def _find_blueprint(conn, grp, grade, blueprint_name, module_group):
