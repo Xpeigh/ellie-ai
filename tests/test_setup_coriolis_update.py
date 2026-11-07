@@ -10,8 +10,8 @@ import setup as setup_script
 
 @pytest.fixture
 def clone(tmp_path, monkeypatch):
-    """A fake coriolis-data clone (with a .git folder and the marker file) and a stub ingest."""
-    folder = tmp_path / "coriolis-data"
+    """A fake Coriolis clone (with a .git folder and the marker file) and a stub ingest."""
+    folder = tmp_path / "coriolis_clone"
     (folder / ".git").mkdir(parents=True)
     marker = folder / "modifications" / "blueprints.json"
     marker.parent.mkdir(parents=True)
@@ -57,7 +57,7 @@ def test_a_failed_pull_still_reingests_the_copy_you_have(clone, monkeypatch, cap
     _record_git(monkeypatch, returncode=1)
     monkeypatch.setattr(setup_script, "_ask_yes_no", lambda prompt, default=True: True)
     assert setup_script.setup_coriolis() is True
-    assert "Updating coriolis-data failed" in capsys.readouterr().out
+    assert "failed -- see the error above" in capsys.readouterr().out
     assert clone.ingested == [True]
 
 
