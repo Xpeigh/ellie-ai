@@ -21,6 +21,7 @@ NEEDS_CORIOLIS_DATA = {
     "test_query_snapshot.py",
     "test_setup_ship_modules.py",
     "test_blueprint_lookup.py",
+    "test_cross_check.py",
 }
 
 

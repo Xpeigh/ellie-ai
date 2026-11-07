@@ -31,6 +31,8 @@ from pathlib import Path
 
 import openpyxl
 
+from blueprint_mapping import clean_material_name
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 XLSX_PATH = sys.argv[1] if len(sys.argv) > 1 else str(SCRIPT_DIR / "Engineers.xlsx")
 DB_PATH = sys.argv[2] if len(sys.argv) > 2 else str(SCRIPT_DIR / "elite-dangerous.db")
@@ -114,7 +116,7 @@ def parse_materials(cell_text):
                 qty = int(qty)
             except ValueError:
                 pass
-            out.append({"qty": qty, "item": item.strip()})
+            out.append({"qty": qty, "item": clean_material_name(item)})
         else:
             # doesn't match "<qty> <name>" (e.g. a credits line with odd
             # formatting) -- keep it verbatim rather than silently drop it
