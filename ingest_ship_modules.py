@@ -19,6 +19,8 @@ import sqlite3
 import sys
 from pathlib import Path
 
+import blueprint_mapping as bm
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_PATH = sys.argv[1] if len(sys.argv) > 1 else str(SCRIPT_DIR / "coriolis-data")
 DB_PATH = sys.argv[2] if len(sys.argv) > 2 else str(SCRIPT_DIR / "elite-dangerous.db")
@@ -260,15 +262,19 @@ def build_module_group_names(conn, repo_path, commit=True):
     return count
 
 
-def build_module_specials(conn, repo_path, commit=True):
+def build_module_specials(conn, repo_path, commit=True, corrections=None):
     """Which experimental effects (specials) each group can take, from the same
-    modifications/modules.json as the blueprint allow-list. Clears and rebuilds."""
+    modifications/modules.json as the blueprint allow-list, plus the groups the commander's own
+    crafts proved (blueprint_corrections.json, "allowed_effects"). Clears and rebuilds."""
     data = json.load(open(Path(repo_path) / "modifications" / "modules.json", encoding="utf-8"))
     conn.execute("DELETE FROM module_specials")
     count = 0
     for grp, entry in data.items():
         for edname in (entry.get("specials") or []):
             count += conn.execute("INSERT OR IGNORE INTO module_specials VALUES (?,?)", (grp, edname)).rowcount
+    for entry in (corrections if corrections is not None else bm.load_corrections()).get("allowed_effects", []):
+        for grp in entry["groups"]:
+            count += conn.execute("INSERT OR IGNORE INTO module_specials VALUES (?,?)", (grp, entry["edname"])).rowcount
     if commit:
         conn.commit()
     return count

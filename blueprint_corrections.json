@@ -1,0 +1,32 @@
+{
+  "graded": [],
+  "experimental": [
+    {
+      "edname": "special_weapon_lightweight",
+      "materials": {"Salvaged Alloys": 5, "Carbon": 5, "Tin": 1},
+      "evidence": "Stripped Down on weapons: 2 crafts (2026-09-26, a pulse laser) consumed 5 Carbon, 5 Salvaged Alloys and 1 Tin; Coriolis lists 3 Carbon. Found with verify_blueprints.py on 2026-11-07."
+    },
+    {
+      "edname": "special_drag_munitions",
+      "materials": {"Carbon": 5, "Grid Resistors": 5, "Molybdenum": 2},
+      "evidence": "Drag Munitions: 1 craft (2026-09-25, a missile rack) consumed 5 Carbon, 5 Grid Resistors and 2 Molybdenum; Coriolis lists 5 Molybdenum. A single craft: re-check when another one is made (the owner chose to apply it on 2026-11-07)."
+    },
+    {
+      "edname": "special_lock_breaker",
+      "materials": {"Selenium": 5, "Security Firmware Patch": 3, "Adaptive Encryptors Capture": 1},
+      "evidence": "Target Lock Breaker: Coriolis's specials.json spells the third material 'Adaptive Encyptors Capture' (typo); blueprints.json and the game spell it 'Adaptive Encryptors Capture', so a held one never matched. Checked 2026-11-07."
+    }
+  ],
+  "allowed_effects": [
+    {
+      "edname": "special_drag_munitions",
+      "groups": ["mr"],
+      "evidence": "Applied to a missile rack on 2026-09-25 (1 craft); Coriolis's modules.json lists it for fragment cannons only."
+    },
+    {
+      "edname": "special_thermal_cascade",
+      "groups": ["mr"],
+      "evidence": "Applied to a missile rack on 2026-09-25 (1 craft; its cost matched Coriolis exactly); Coriolis's modules.json lists it for cannons only."
+    }
+  ]
+}

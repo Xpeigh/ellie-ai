@@ -62,3 +62,22 @@ changed your spreadsheet, run `python ingest_excel.py` instead.
 What is rebuilt: the reference tables (blueprint costs, effects, ship and module stats, which module takes which
 blueprint and effect, module names). What is never touched: the live tables the journal watcher keeps (your
 materials, ship, fuel and cargo).
+
+## Corrections to Coriolis, with the evidence
+
+Ellie applies a short list of corrections when the tables are built (`blueprint_corrections.json`; each entry
+carries its evidence). They come from comparing Coriolis with the crafts in the owner's own journal on 2026-11-07
+(`python verify_blueprints.py`), and were applied at the owner's request:
+
+| What | Coriolis says | The game did | Evidence |
+|---|---|---|---|
+| Stripped Down on weapons | 3 Carbon, 5 Salvaged Alloys, 1 Tin | 5 Carbon, 5 Salvaged Alloys, 1 Tin | 2 crafts, a pulse laser |
+| Drag Munitions | 5 Carbon, 5 Grid Resistors, 5 Molybdenum | 5 Carbon, 5 Grid Resistors, **2 Molybdenum** | **1 craft only**, a missile rack; re-check when another is made |
+| Target Lock Breaker | material spelled "Adaptive Encyptors Capture" | "Adaptive Encryptors Capture" (as in `blueprints.json` and the game) | a held one never matched the typo |
+| Missile racks and effects | no effects listed for missile racks | Drag Munitions and Thermal Cascade were applied to a missile rack | 1 craft each; without this Ellie would refuse them |
+
+Everything else in the journal (all 48 blueprint-and-grade combinations and the other 7 effects, and every
+blueprint on every module you crafted) agrees with Coriolis. If Coriolis fixes an entry, the correction either
+becomes redundant (harmless) or no longer matches, and `python setup.py` says so ("corrections: N of M applied").
+
+A draft report for Coriolis's maintainers is in [upstream-coriolis-report.md](upstream-coriolis-report.md).

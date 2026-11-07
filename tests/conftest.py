@@ -54,6 +54,8 @@ def _coriolis_template(tmp_path_factory):
     ic.build_schema(conn)
     ic.ingest_blueprints(conn, json.load(open(repo / "modifications" / "blueprints.json", encoding="utf-8")))
     ic.ingest_specials(conn, json.load(open(repo / "modifications" / "specials.json", encoding="utf-8")))
+    import blueprint_mapping as bm
+    ic.apply_corrections(conn, bm.load_corrections())      # the shipped corrections, as setup applies them
     conn.commit()
     conn.close()
     return path

@@ -7,7 +7,9 @@ cannot supply, in-game blueprint aliases, and the small string helpers the looku
 share. The database-backed resolver lives in query_functions.py.
 Used by: query_functions.py, ingest_excel.py.
 """
+import json
 import re
+from pathlib import Path
 
 
 # ---------------------------------------------------------------------------
@@ -60,3 +62,15 @@ def clean_material_name(text):
     """A material name without the stray count the sheet sometimes leaves in brackets:
     'Conductive Polymers (0)' -> 'Conductive Polymers'."""
     return re.sub(r"\s*\(\d+\)\s*$", "", text or "").strip()
+
+
+# Evidence-backed corrections to Coriolis's data, applied when the tables are built.
+CORRECTIONS_PATH = Path(__file__).resolve().parent / "blueprint_corrections.json"
+
+
+def load_corrections(path=None):
+    """blueprint_corrections.json as {"graded": [...], "experimental": [...], "allowed_effects": [...]};
+    a missing file is the same as an empty one. Each entry carries the journal evidence for it."""
+    path = Path(path) if path else CORRECTIONS_PATH
+    data = json.load(open(path, encoding="utf-8")) if path.exists() else {}
+    return {key: data.get(key, []) for key in ("graded", "experimental", "allowed_effects")}

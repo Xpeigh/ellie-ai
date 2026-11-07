@@ -96,6 +96,29 @@ def compare(conn, summary):
     return results
 
 
+def check_allow_lists(conn, crafts):
+    """Crafts the allow-lists say are impossible: a blueprint crafted on a module group
+    Coriolis does not list it for, or an experimental effect applied to a group it does not
+    list. Each one means the allow-list lags the game (or a name is off), and Ellie would wrongly
+    refuse that combination. A module Ellie has no stats for (a ship's own armour) is skipped."""
+    groups = {r["symbol"]: r["grp"] for r in conn.execute("SELECT symbol, grp FROM module_stats")}
+    blueprints, effects = collections.defaultdict(set), collections.defaultdict(set)
+    for r in conn.execute("SELECT grp, fdname FROM module_blueprints"):
+        blueprints[r["fdname"].lower()].add(r["grp"])
+    for r in conn.execute("SELECT grp, edname FROM module_specials"):
+        effects[r["edname"].lower()].add(r["grp"])
+    found = collections.Counter()
+    for c in crafts:
+        grp = groups.get((c["module"] or "").lower())
+        if grp is None:
+            continue
+        if c["blueprint"] and grp not in blueprints.get(c["blueprint"].lower(), set()):
+            found[("blueprint", c["blueprint"], grp)] += 1
+        if c["effect"] and grp not in effects.get(c["effect"].lower(), set()):
+            found[("effect", c["effect"], grp)] += 1
+    return [{"kind": kind, "id": ident, "group": grp, "crafts": n} for (kind, ident, grp), n in sorted(found.items())]
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Check Ellie's engineering costs against your own crafts.")
     parser.add_argument("journal_dir", nargs="?", default=str(DEFAULT_JOURNAL_DIR))
@@ -114,6 +137,10 @@ def main(argv=None):
     conn.row_factory = sqlite3.Row
     try:
         results = compare(conn, summary)
+        try:
+            violations = check_allow_lists(conn, crafts)
+        except sqlite3.OperationalError:
+            violations = None
     finally:
         conn.close()
     counts = collections.Counter(r["status"] for r in results)
@@ -130,6 +157,14 @@ def main(argv=None):
         print(f"  Ellie says:        {r['expected']}")
         for c in detail[(r["id"], r["grade"])][:3]:
             print(f"  e.g. {c['when']}  {c['module']}  {c['engineer']}")
+    if violations is None:
+        print("\n(allow-list check skipped: the ship and module tables are missing; run python setup.py)")
+    elif violations:
+        print(f"\nALLOW-LIST: {len(violations)} combination(s) you made that Coriolis's lists say are impossible:")
+        for v in violations:
+            print(f"  {v['kind']} {v['id']} on group {v['group']} ({v['crafts']} craft(s))")
+    else:
+        print("\nallow-lists: every craft you made fits Coriolis's lists")
     return 0
 
 

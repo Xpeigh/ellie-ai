@@ -326,3 +326,20 @@ def test_a_spreadsheet_effect_row_is_used_first_and_its_annotations_are_cleaned(
         json.dumps([{"qty": 5, "item": "Atypical Disrupted Wake Echoes (3)"}]), "Heavier ship")])
     r = qf.get_experimental_effect("FSD", "mass manager")
     assert r["source"] == "excel" and r["materials"] == {"Atypical Disrupted Wake Echoes": 5} and r["description"] == "Heavier ship"
+
+
+def test_effects_the_commander_applied_to_a_missile_rack_are_not_refused(coriolis_db):
+    drag = qf.get_experimental_effect("Missile Rack", "Drag Munitions")
+    assert drag["found"] is True and drag["materials"] == {"Carbon": 5, "Grid Resistors": 5, "Molybdenum": 2}
+    cascade = qf.get_experimental_effect("Missile Rack", "Thermal Cascade")
+    assert cascade["found"] is True and cascade["materials"]["Phosphorus"] == 5
+
+
+def test_stripped_down_on_weapons_uses_the_cost_the_game_charged(coriolis_db):
+    assert qf.get_experimental_effect("Pulse Laser", "Stripped Down")["materials"] == {"Salvaged Alloys": 5, "Carbon": 5, "Tin": 1}
+
+
+def test_target_lock_breaker_uses_the_games_spelling_of_its_material(coriolis_db):
+    r = qf.get_experimental_effect("Plasma Accelerator", "Target lock breaker")
+    assert r["found"] is True and "Adaptive Encryptors Capture" in r["materials"]
+    assert not any("Encyptors" in name for name in r["materials"])

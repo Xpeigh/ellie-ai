@@ -22,6 +22,8 @@ import sqlite3
 import sys
 from pathlib import Path
 
+import blueprint_mapping as bm
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_PATH = sys.argv[1] if len(sys.argv) > 1 else str(SCRIPT_DIR / "coriolis-data")
 DB_PATH = sys.argv[2] if len(sys.argv) > 2 else str(SCRIPT_DIR / "elite-dangerous.db")
@@ -76,6 +78,20 @@ def ingest_specials(conn, data):
     return count
 
 
+def apply_corrections(conn, corrections):
+    """Replace Coriolis's cost wherever the commander's own crafts (verify_blueprints.py)
+    proved it wrong. Returns how many rows changed; the caller reports entries that changed
+    nothing, because that means Coriolis renamed or fixed them."""
+    changed = 0
+    for entry in corrections.get("graded", []):
+        changed += conn.execute("UPDATE coriolis_blueprints SET materials_json = ? WHERE fdname = ? AND grade = ?",
+                                (json.dumps(entry["materials"]), entry["fdname"], entry["grade"])).rowcount
+    for entry in corrections.get("experimental", []):
+        changed += conn.execute("UPDATE coriolis_experimental_effects SET materials_json = ? WHERE lower(edname) = lower(?)",
+                                (json.dumps(entry["materials"]), entry["edname"])).rowcount
+    return changed
+
+
 def main():
     conn = sqlite3.connect(DB_PATH)
     build_schema(conn)
@@ -89,10 +105,15 @@ def main():
 
     bp_count = ingest_blueprints(conn, blueprints)
     sp_count = ingest_specials(conn, specials)
+    corrections = bm.load_corrections()
+    wanted = len(corrections["graded"]) + len(corrections["experimental"])
+    applied = apply_corrections(conn, corrections)
     conn.commit()
 
     print(f"coriolis_blueprints: {bp_count} rows ({len(blueprints)} blueprint types x grades)")
     print(f"coriolis_experimental_effects: {sp_count} rows")
+    if wanted:
+        print(f"corrections: {applied} of {wanted} applied" + ("" if applied == wanted else " -- some no longer match Coriolis; check blueprint_corrections.json"))
     conn.close()
 
 

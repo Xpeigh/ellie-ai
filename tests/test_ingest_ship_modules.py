@@ -360,3 +360,18 @@ def test_ingest_all_fills_the_new_tables_and_keeps_its_three_part_result(tmp_pat
     again = ism.ingest_all(conn, str(REPO))                      # a rerun rebuilds, it does not duplicate
     assert again == result
     conn.close()
+
+
+def test_corrections_can_add_a_group_to_an_effect(tmp_path):
+    conn = _fresh_db(tmp_path)
+    ism.build_module_specials(conn, str(REPO), corrections={"allowed_effects": [{"edname": "special_fsd_heavy", "groups": ["zz"], "evidence": "e"}]})
+    conn.commit()
+    assert conn.execute("SELECT COUNT(*) FROM module_specials WHERE grp = 'zz' AND edname = 'special_fsd_heavy'").fetchone()[0] == 1
+
+
+def test_the_shipped_corrections_let_missile_racks_take_the_effects_real_crafts_showed(tmp_path):
+    conn = _fresh_db(tmp_path)
+    ism.build_module_specials(conn, str(REPO))
+    conn.commit()
+    mr = {r[0] for r in conn.execute("SELECT edname FROM module_specials WHERE grp = 'mr'")}
+    assert {"special_drag_munitions", "special_thermal_cascade"} <= mr
