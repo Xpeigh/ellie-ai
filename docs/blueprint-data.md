@@ -15,7 +15,8 @@ database, `elite-dangerous.db`, and the reply says which source it used.
 ## Which one wins
 
 Sheet first: when your spreadsheet has the module, upgrade and grade, that row is used. Otherwise Coriolis
-answers. Where both have an answer they agree on 617 of 622 rows (checked 2026-11-06 with `python cross_check.py`).
+answers. Where both have an answer they agree on 656 of 668 rows (98%; checked 2026-11-07 with `python cross_check.py`,
+which now covers every module). The 12 rows that differ are listed below; nothing was changed silently.
 
 ## What a cost means
 
@@ -23,9 +24,11 @@ answers. Where both have an answer they agree on 617 of 622 rows (checked 2026-1
 - An experimental effect's cost is **per application**.
 - If a source lists an upgrade with no materials, Ellie says "no materials are recorded", never "free".
 
-## Known differences between the sources (2026-11-06)
+## Known differences between the sources (2026-11-07)
 
-For you to decide, nothing is changed silently. The sheet is used for these.
+For you to decide, nothing is changed silently. The sheet is used for these. The first five were known on
+2026-11-06; the last seven appeared when the cross-check began covering shields and hull reinforcement. The
+journal cannot settle them (those blueprints have not been crafted), so check them in the game.
 
 | Module / upgrade / grade | Sheet | Coriolis |
 |---|---|---|
@@ -34,6 +37,13 @@ For you to decide, nothing is changed silently. The sheet is used for these.
 | Mining Laser / Long Range / 4 | Modified Consumer Firmware, Conductive Polymers, Selenium, Heat Vanes, 10 Merc Coin | Conductive Polymers, Focus Crystals, Modified Consumer Firmware |
 | Mining Laser / Long Range / 5 | Cracked Industrial Firmware, Thermic Alloys, Biotech Conductors, Proto Heat Radiators, 25 Merc Coin | Biotech Conductors, Cracked Industrial Firmware, Thermic Alloys |
 | Chaff Launcher / Ammo Capacity / 1 | Mechanical Scrap | Mechanical Scrap, Niobium, Vanadium |
+| Shield Generator / Reinforced / 1 | Nickel | Phosphorus |
+| Shield Generator / Reinforced / 2 | Nickel, Shield Emitters | Conductive Components, Phosphorus |
+| Shield Generator / Reinforced / 3 | Nickel, Shield Emitters, Tungsten | Conductive Components, Mechanical Components, Phosphorus |
+| Shield Generator / Reinforced / 4 | Zinc, Tungsten, Molybdenum | Conductive Ceramics, Configurable Components, Manganese |
+| Shield Generator / Reinforced / 5 | High Density Composites, Molybdenum, Technetium | Arsenic, Conductive Polymers, Improvised Components |
+| Hull Reinforcement Package / Lightweight / 1-5 | Phosphorus; Salvaged Alloys + Manganese; ... (all five grades differ) | Iron; Conductive Components + Iron; ... (all five grades differ) |
+| Shield Cell Bank / Rapid Charge / 4 | Chromium, Electrochemical Arrays, Thermic Alloys | Hybrid Capacitors, Precipitated Alloys, Sulphur |
 
 ## Checking costs against your own crafts
 
