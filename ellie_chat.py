@@ -95,11 +95,11 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "get_blueprint",
-            "description": "Get the materials ONE roll of an engineering blueprint costs at a given grade (1-5), for any module: frame shift drive, thrusters, power plant, power distributor, life support, sensors, shield generator, armour, weapons, utilities and optional internals.",
+            "description": "Get the materials ONE roll of an engineering blueprint costs at a given grade (1-5) for one specific ship module: a frame shift drive, thrusters, a power plant, a shield generator, or a particular weapon, utility or optional internal.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "module_name": {"type": "string", "description": "Module name, e.g. 'Frame Shift Drive', 'Thrusters', 'Beam Laser'"},
+                    "module_name": {"type": "string", "description": "Module name as the commander said it, e.g. 'Frame Shift Drive', 'Thrusters', 'Shield Generator'"},
                     "upgrade_name": {"type": "string", "description": "Blueprint name, e.g. 'Increased range', 'Dirty', 'Overcharged'"},
                     "grade": {"type": "integer", "description": "Blueprint grade, 1 to 5"},
                 },
@@ -130,7 +130,7 @@ TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "module_name": {"type": "string", "description": "Module name, e.g. 'Frame Shift Drive', 'Thrusters', 'Beam Laser'"},
+                    "module_name": {"type": "string", "description": "Module name as the commander said it, e.g. 'Frame Shift Drive', 'Thrusters', 'Shield Generator'"},
                     "upgrade_name": {"type": "string", "description": "Blueprint name, e.g. 'Increased range', 'Dirty', 'Overcharged'"},
                     "grade": {"type": "integer", "description": "Blueprint grade, 1 to 5"},
                 },

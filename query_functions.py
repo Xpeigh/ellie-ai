@@ -165,8 +165,9 @@ def _resolve_module_groups(conn, typed):
 
 
 _MODULE_HINT = ("Core modules she knows: frame shift drive, thrusters, power plant, power distributor, "
-                "life support, sensors, shield generator, armour; weapons, utilities and optional "
-                "internals by their usual names.")
+                "life support, sensors, shield generator, armour. Weapons and the rest are named one by one, "
+                "for example beam laser, burst laser, pulse laser, cannon, multi-cannon, rail gun, missile rack, "
+                "fuel scoop, shield booster.")
 
 
 def _grade_number(grade):
@@ -478,7 +479,8 @@ def missing_materials(module_name: str, upgrade_name: str, grade: int) -> dict:
     if have_enough:
         summary = f"You have everything for {label} (per roll)."
     else:
-        summary = (f"For {label} (per roll) you are short by: "
+        summary = (f"For {label} (per roll) you need " + ", ".join(f"{qty} {name}" for name, qty in required.items())
+                   + ". You are short by: "
                    + ", ".join(f"{m['short_by']} {name} (have {m['have']})" for name, m in missing.items()) + ".")
     if shared.get("other_requirements"):
         summary += f" Also listed: {', '.join(shared['other_requirements'])}."

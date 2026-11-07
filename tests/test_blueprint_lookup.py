@@ -162,6 +162,7 @@ def test_an_unknown_blueprint_for_a_known_module_lists_the_real_ones(coriolis_db
 def test_an_unknown_module_and_a_module_with_no_blueprints(coriolis_db):
     r = qf.get_blueprint("xyzzy", "Dirty", 1)
     assert r["found"] is False and r["reason"].startswith("Ellie doesn't know a module called 'xyzzy'. Core modules she knows:")
+    assert "burst laser" in r["reason"] and "weapons, utilities" not in r["reason"]    # name real weapons, not the word "weapons"
     r = qf.get_blueprint("Module Reinforcement Package", "Dirty", 1)
     assert r["found"] is False and r["reason"] == "Module Reinforcement Package has no engineering blueprints in Ellie's data."
 
@@ -251,7 +252,8 @@ def test_missing_materials_names_what_is_short_and_how_much(coriolis_db):
     assert r["have_everything"] is False
     assert r["missing"] == {"Atypical Disrupted Wake Echoes": {"need": 1, "have": 0, "short_by": 1},
                             "Chemical Processors": {"need": 1, "have": 0, "short_by": 1}}
-    assert r["summary"] == ("For Frame Shift Drive, Increased range, grade 2 (per roll) you are short by: "
+    assert r["summary"] == ("For Frame Shift Drive, Increased range, grade 2 (per roll) you need "
+                            "1 Atypical Disrupted Wake Echoes, 1 Chemical Processors. You are short by: "
                             "1 Atypical Disrupted Wake Echoes (have 0), 1 Chemical Processors (have 0).")
 
 
