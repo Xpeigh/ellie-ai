@@ -159,6 +159,8 @@ def _resolve_module_groups(conn, typed):
     if text in MODULE_GROUP_TO_GRP:
         return [MODULE_GROUP_TO_GRP[text]]
     known = {r["grp"] for r in names} | set(MODULE_GROUP_TO_GRP.values())
+    # a group with blueprints or effects but no module file (ship armour, 'bh') is still a known code
+    known |= {r["grp"] for r in conn.execute("SELECT grp FROM module_blueprints UNION SELECT grp FROM module_specials")}
     return [key] if key in known else []
 
 
@@ -194,11 +196,6 @@ def _split_materials(materials_json):
         else:
             extras.append(name)
     return counted, extras
-
-
-def _materials_to_dict(materials_json):
-    """Removed in Task 6; kept so missing_materials and get_experimental_effect keep working until then."""
-    return _split_materials(materials_json)[0]
 
 
 def _materials_text(materials, extras):
@@ -341,46 +338,97 @@ def get_blueprint(module_name: str, upgrade_name: str, grade: int) -> dict:
         conn.close()
 
 
+def _special_cost(conn, edname):
+    row = conn.execute(
+        "SELECT name, description, materials_json FROM coriolis_experimental_effects WHERE lower(edname) = lower(?)", (edname,)).fetchone()
+    if row is None:
+        return None
+    materials, extras = _split_materials(row["materials_json"])
+    return {"name": row["name"], "description": row["description"], "materials": materials, "extras": extras}
+
+
+def _sheet_effect(conn, module_name, groups, effect_name):
+    names = _sheet_module_names(conn, "ungraded_costs", module_name, groups)
+    rows = _sheet_rows(
+        conn,
+        "SELECT module_name, effect, materials_json, modifiers_text FROM ungraded_costs "
+        f"WHERE lower(module_name) IN ({_in_marks(names)})", tuple(names))
+    candidates = [{"fdname": "", "upgrade_name": r["effect"], "row": r} for r in rows]
+    hits = _blueprint_name_matches(candidates, effect_name)
+    return hits[0]["row"] if len(hits) == 1 else None
+
+
+def _effect_reply(base, source, effect_name, materials, extras, description):
+    label = f"{base['module']}, {effect_name}"
+    reply = {"found": True, "source": source, **base}
+    reply.update(effect_name=effect_name, materials=materials, materials_per="application",
+                 cost_known=bool(materials or extras), description=description)
+    if extras:
+        reply["other_requirements"] = extras
+    if materials or extras:
+        reply["summary"] = f"{label}, each time it is applied: {_materials_text(materials, extras)}."
+    else:
+        reply["summary"] = f"{label}: no materials are recorded for this effect, so its cost is not known."
+    return reply
+
+
+def _unknown_effect_reason(conn, module_name, effect_name, offered):
+    listing = f"Experimental effects available for {module_name}: {', '.join(offered)}."
+    everything = [{"fdname": r["edname"], "upgrade_name": r["name"]}
+                  for r in conn.execute("SELECT edname, name FROM coriolis_experimental_effects")]
+    elsewhere = _blueprint_name_matches(everything, effect_name)
+    if not elsewhere:
+        return f"Ellie doesn't know an experimental effect called '{effect_name}'. {listing}"
+    eds = sorted({h["fdname"].lower() for h in elsewhere})
+    grps = [r["grp"] for r in conn.execute(
+        f"SELECT DISTINCT grp FROM module_specials WHERE lower(edname) IN ({_in_marks(eds)}) ORDER BY grp", eds)]
+    labels = [_group_label(conn, g) for g in grps]
+    shown = ", ".join(labels[:8]) + (f" and {len(labels) - 8} more" if len(labels) > 8 else "")
+    return f"'{effect_name}' can't be applied to {module_name}; it applies to {shown}. {listing}"
+
+
 @_needs_setup
 def get_experimental_effect(module_name: str, effect_name: str) -> dict:
-    """Materials required for an experimental effect (ungraded -- single
-    cost, no grade 1-5). Checks Excel's ungraded_costs first, falls back
-    to Coriolis's coriolis_experimental_effects."""
+    """Materials an experimental effect costs each time it is applied (ungraded -- a
+    single cost). The spreadsheet's row first, then Coriolis. The effect must be one the
+    module's group can take (module_specials): 'Mass Manager' on thrusters is refused,
+    and the reply says where it does fit."""
+    module_name = str(module_name or "").strip()
+    effect_name = str(effect_name or "").strip()
+    base = {"module": module_name, "effect_name": effect_name}
     conn = _connect()
     try:
-        row = conn.execute(
-            "SELECT materials_json, modifiers_text FROM ungraded_costs "
-            "WHERE lower(module_name) = lower(?) AND lower(effect) = lower(?)",
-            (module_name, effect_name),
-        ).fetchone()
-        if row:
-            return {
-                "found": True,
-                "source": "excel",
-                "module": module_name,
-                "effect_name": effect_name,
-                "materials": _materials_to_dict(row["materials_json"]),
-                "description": row["modifiers_text"],
-            }
-
-        row = conn.execute(
-            "SELECT name, description, materials_json FROM coriolis_experimental_effects "
-            "WHERE lower(name) = lower(?)",
-            (effect_name,),
-        ).fetchone()
+        groups = _resolve_module_groups(conn, module_name)
+        sheet = _sheet_effect(conn, module_name, groups, effect_name)
+        if sheet is not None:
+            materials, extras = _split_materials(sheet["materials_json"])
+            return _effect_reply(base, "excel", sheet["effect"], materials, extras, sheet["modifiers_text"])
+        if not groups:
+            return {"found": False, **base, "reason": f"Ellie doesn't know a module called '{module_name}'. {_MODULE_HINT}"}
+        allowed = [r["edname"].lower() for r in conn.execute(
+            f"SELECT DISTINCT edname FROM module_specials WHERE grp IN ({_in_marks(groups)})", groups)]
+        rows = conn.execute(
+            "SELECT edname, name FROM coriolis_experimental_effects "
+            f"WHERE lower(edname) IN ({_in_marks(allowed)})", allowed).fetchall() if allowed else []
+        if not rows:
+            return {"found": False, **base, "reason": f"{module_name} has no experimental effects in Ellie's data."}
+        offered = sorted({r["name"] for r in rows})
+        hits = _blueprint_name_matches([{"fdname": r["edname"], "upgrade_name": r["name"]} for r in rows], effect_name)
+        if len(hits) > 1:
+            costs = [_special_cost(conn, h["fdname"])["materials"] for h in hits]
+            if all(c == costs[0] for c in costs):      # Coriolis lists some effects twice (Mass Lock Munition on torpedo pylons)
+                hits = hits[:1]
+        if len(hits) > 1:
+            names = sorted({h["upgrade_name"] for h in hits})
+            return {"found": False, **base, "available_effects": offered,
+                    "reason": f"'{effect_name}' could mean more than one effect for {module_name}: {', '.join(names)}. Ask which one."}
+        if not hits:
+            return {"found": False, **base, "available_effects": offered,
+                    "reason": _unknown_effect_reason(conn, module_name, effect_name, offered)}
+        cost = _special_cost(conn, hits[0]["fdname"])
+        return _effect_reply(base, "coriolis", cost["name"], cost["materials"], cost["extras"], cost["description"])
     finally:
         conn.close()
-    if row:
-        return {
-            "found": True,
-            "source": "coriolis",
-            "module": module_name,
-            "effect_name": row["name"],
-            "materials": _materials_to_dict(row["materials_json"]),
-            "description": row["description"],
-        }
-
-    return {"found": False, "module": module_name, "effect_name": effect_name}
 
 
 def _material_key(name):

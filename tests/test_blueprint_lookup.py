@@ -26,6 +26,7 @@ def _conn(path):
     ("Collector Limpet Controller", ["cc"]), ("Cargo Rack", ["cr"]), ("Fuel Scoop", ["fs"]),
     ("Module Reinforcement Package", ["mrp"]),
     ("fsd", ["fsd"]),                                  # a raw group code
+    ("bh", ["bh"]),                                    # ... also for a group with no module file (ship armour)
     ("xyzzy", []), ("", []), ("   ", []), (None, []),
 ])
 def test_a_typed_module_name_resolves_to_its_group(coriolis_db, typed, expected):
@@ -265,3 +266,63 @@ def test_missing_materials_carries_a_blueprint_miss_through(coriolis_db):
     assert r["found"] is False and r["available_upgrades"] == ["Faster boot sequence", "Increased range", "Shielded"]
     assert r["module"] == "Frame Shift Drive" and r["upgrade"] == "Turbo" and r["grade"] == 2
     assert qf.missing_materials("Frame Shift Drive", "Increased range", "five")["reason"] == "The grade must be a number from 1 to 5."
+
+
+def test_an_effect_that_fits_the_module_returns_its_cost_per_application(coriolis_db):
+    r = qf.get_experimental_effect("Frame Shift Drive", "Mass Manager")
+    assert r["found"] is True and r["source"] == "coriolis"
+    assert r["materials"] == {"Atypical Disrupted Wake Echoes": 5, "Galvanising Alloys": 3, "Eccentric Hyperspace Trajectories": 1}
+    assert r["materials_per"] == "application" and r["cost_known"] is True
+    assert r["summary"] == ("Frame Shift Drive, Mass Manager, each time it is applied: "
+                            "5 Atypical Disrupted Wake Echoes, 3 Galvanising Alloys, 1 Eccentric Hyperspace Trajectories.")
+
+
+def test_an_effect_the_module_cannot_take_is_refused_and_says_where_it_fits(coriolis_db):
+    r = qf.get_experimental_effect("Thrusters", "Mass Manager")
+    assert r["found"] is False
+    assert r["reason"] == ("'Mass Manager' can't be applied to Thrusters; it applies to Frame Shift Drive. "
+                           "Experimental effects available for Thrusters: "
+                           "Double Braced, Drag Drives, Drive Distributors, Stripped Down, Thermal Spread.")
+    assert r["available_effects"] == ["Double Braced", "Drag Drives", "Drive Distributors", "Stripped Down", "Thermal Spread"]
+
+
+def test_the_same_effect_name_means_the_right_effect_for_each_module(coriolis_db):
+    weapon = qf.get_experimental_effect("Cannon", "Stripped Down")
+    engine = qf.get_experimental_effect("Thrusters", "Stripped Down")
+    assert weapon["found"] and engine["found"] and weapon["materials"] != engine["materials"]
+
+
+def test_an_unknown_effect_unknown_module_and_a_module_without_effects(coriolis_db):
+    r = qf.get_experimental_effect("Frame Shift Drive", "Turbo")
+    assert r["found"] is False and r["reason"].startswith("Ellie doesn't know an experimental effect called 'Turbo'. Experimental effects available for Frame Shift Drive:")
+    assert qf.get_experimental_effect("xyzzy", "Mass Manager")["reason"].startswith("Ellie doesn't know a module called 'xyzzy'.")
+    assert qf.get_experimental_effect("Module Reinforcement Package", "Mass Manager")["reason"] == "Module Reinforcement Package has no experimental effects in Ellie's data."
+    assert qf.get_experimental_effect("", "")["found"] is False
+
+
+def test_every_effect_coriolis_lists_for_a_group_is_reachable_by_name(coriolis_db):
+    conn = _conn(coriolis_db)
+    failures, checked = [], 0
+    try:
+        for row in conn.execute("SELECT grp, edname FROM module_specials ORDER BY grp, edname").fetchall():
+            effect = conn.execute("SELECT name, materials_json FROM coriolis_experimental_effects WHERE lower(edname) = lower(?)", (row["edname"],)).fetchone()
+            module = (conn.execute("SELECT name FROM module_group_names WHERE grp = ? ORDER BY length(name) DESC", (row["grp"],)).fetchone() or {"name": row["grp"]})["name"]
+            if effect is None:
+                failures.append((row["grp"], row["edname"], "listed for the group but missing from specials.json"))
+                continue
+            checked += 1
+            got = qf.get_experimental_effect(module, effect["name"])
+            if not got["found"] or got["materials"] != json.loads(effect["materials_json"]):
+                failures.append((row["grp"], row["edname"], got.get("reason") or got.get("materials")))
+    finally:
+        conn.close()
+    assert checked > 100
+    assert failures == []
+
+
+def test_a_spreadsheet_effect_row_is_used_first_and_its_annotations_are_cleaned(coriolis_db):
+    _add_sheet(coriolis_db, cost_rows=[(
+        "core_internal_experimental", "Frame Shift Drive", "Mass Manager",
+        json.dumps([{"qty": 5, "item": "Atypical Disrupted Wake Echoes (3)"}]), "Heavier ship")])
+    r = qf.get_experimental_effect("FSD", "mass manager")
+    assert r["source"] == "excel" and r["materials"] == {"Atypical Disrupted Wake Echoes": 5} and r["description"] == "Heavier ship"
