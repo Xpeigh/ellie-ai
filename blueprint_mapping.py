@@ -74,3 +74,10 @@ def load_corrections(path=None):
     path = Path(path) if path else CORRECTIONS_PATH
     data = json.load(open(path, encoding="utf-8")) if path.exists() else {}
     return {key: data.get(key, []) for key in ("graded", "experimental", "allowed_effects")}
+
+
+# Words a typed blueprint or effect name may carry besides the name's own words, whatever the module
+# ("Dirty Drive Tuning", "Efficient Weapon", "High Capacity Magazine"). Any OTHER extra word must belong
+# to the module being asked about, otherwise the match is refused: "Engine Focused" is not "Focused" for a laser.
+GENERIC_EXTRA_WORDS = frozenset({"weapon", "weapons", "mount", "modification", "tuning", "drive", "drives",
+                                 "magazine", "upgrade", "blueprint"})

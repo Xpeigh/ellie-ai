@@ -27,6 +27,8 @@ def _conn(path):
     ("Module Reinforcement Package", ["mrp"]),
     ("fsd", ["fsd"]),                                  # a raw group code
     ("bh", ["bh"]),                                    # ... also for a group with no module file (ship armour)
+    ("beam lasers", ["bl"]), ("Shield Boosters", ["sb"]), ("multi-cannons", ["mc"]),   # a typed plural
+    ("frame shift drives", ["fsd"]), ("Power Plants", ["pp"]),
     ("xyzzy", []), ("", []), ("   ", []), (None, []),
 ])
 def test_a_typed_module_name_resolves_to_its_group(coriolis_db, typed, expected):
@@ -345,3 +347,46 @@ def test_target_lock_breaker_uses_the_games_spelling_of_its_material(coriolis_db
     r = qf.get_experimental_effect("Plasma Accelerator", "Target lock breaker")
     assert r["found"] is True and "Adaptive Encryptors Capture" in r["materials"]
     assert not any("Encyptors" in name for name in r["materials"])
+
+
+# --- final review, finding 1: a name that only shares a word must be a miss, never a different blueprint ---
+
+@pytest.mark.parametrize("module, name", [
+    ("pulse laser", "Efficient Weapon"), ("pulse laser", "Lightweight weapon"), ("armour", "Kinetic Resistant Armour"),
+])
+def test_an_effect_name_that_only_shares_a_word_is_a_miss_not_a_wrong_cost(coriolis_db, module, name):
+    r = qf.get_experimental_effect(module, name)
+    assert r["found"] is False, r
+
+
+@pytest.mark.parametrize("module, name", [
+    ("pulse laser", "Engine Focused"), ("burst laser", "System Focused"), ("plasma accelerator", "Engine Focused"),
+    ("shield cell bank", "Rapid fire"), ("sensors", "Expanded Capacity"),
+    ("frame shift drive interdictor", "Expanded Capacity"), ("thrusters", "Reinforced Shields"),
+])
+def test_a_blueprint_name_with_foreign_words_is_a_miss_not_a_different_blueprint(coriolis_db, module, name):
+    r = qf.get_blueprint(module, name, 1)
+    assert r["found"] is False, r
+
+
+def test_the_swap_simulator_gets_the_same_protection(coriolis_db):
+    conn = _conn(coriolis_db)
+    try:
+        row, miss = qf._find_blueprint(conn, "pl", 1, "Engine Focused", "pulse laser")
+        assert row is None and miss["found"] is False
+        row, miss = qf._find_blueprint(conn, "pl", 1, "Focused", "pulse laser")
+        assert miss is None and row["fdname"] == "Weapon_Focused"
+        row, miss = qf._find_blueprint(conn, "pl", 1, "Focused weapon", "pulse laser")     # 'weapon' is a generic word: still fine
+        assert miss is None and row["fdname"] == "Weapon_Focused"
+    finally:
+        conn.close()
+
+
+def test_the_modules_own_words_are_still_welcome_around_a_blueprint_name(coriolis_db):
+    for module, name, upgrade in [
+        ("thrusters", "Dirty Drive Tuning", "Dirty"), ("frame shift drive", "Shielded FSD", "Shielded"),
+        ("power plant", "Low Emissions Power Plant", "Low emissions"), ("sensors", "Long Range Sensors", "Long range"),
+        ("armour", "Heavy Duty Armour", "Heavy duty"), ("beam laser", "Efficient Weapon", "Efficient"),
+    ]:
+        r = qf.get_blueprint(module, name, 1)
+        assert r["found"] is True and r["upgrade"] == upgrade, (module, name, r.get("reason"))

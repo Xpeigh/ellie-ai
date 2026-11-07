@@ -18,7 +18,8 @@ import re
 import sqlite3
 from pathlib import Path
 
-from blueprint_mapping import BLUEPRINT_ALIASES, GROUP_SYNONYMS, clean_material_name, name_tokens, squash
+from blueprint_mapping import (BLUEPRINT_ALIASES, GENERIC_EXTRA_WORDS, GROUP_SYNONYMS, clean_material_name,
+                               name_tokens, squash)
 from loadout_calc import compute_jump_range, compute_current_jump_range, apply_blueprint_delta
 
 DB_PATH = str(Path(__file__).resolve().parent / "elite-dangerous.db")
@@ -161,7 +162,26 @@ def _resolve_module_groups(conn, typed):
     known = {r["grp"] for r in names} | set(MODULE_GROUP_TO_GRP.values())
     # a group with blueprints or effects but no module file (ship armour, 'bh') is still a known code
     known |= {r["grp"] for r in conn.execute("SELECT grp FROM module_blueprints UNION SELECT grp FROM module_specials")}
-    return [key] if key in known else []
+    if key in known:
+        return [key]
+    if len(key) > 3 and key.endswith("s"):          # a typed plural: 'beam lasers', 'shield boosters'
+        singular = key[:-1]
+        hits = sorted({r["grp"] for r in names if squash(r["name"]) == singular})
+        return hits or sorted({grp for name, grp in GROUP_SYNONYMS.items() if squash(name) == singular})
+    return []
+
+
+def _module_words(conn, groups, typed_module):
+    """The words that belong to a module: what was typed for it, its group names and its synonyms.
+    A typed blueprint name may carry these besides its own words ('Low Emissions Power Plant')."""
+    words = set(name_tokens(typed_module))
+    if groups:
+        for r in conn.execute(f"SELECT name FROM module_group_names WHERE grp IN ({','.join('?' * len(groups))})", groups):
+            words |= name_tokens(r["name"])
+        for name, grp in GROUP_SYNONYMS.items():
+            if grp in groups:
+                words |= name_tokens(name)
+    return words
 
 
 _MODULE_HINT = ("Core modules she knows: frame shift drive, thrusters, power plant, power distributor, "
@@ -257,7 +277,7 @@ def _sheet_blueprint(conn, module_name, groups, upgrade_name, grade):
         "SELECT module_name, upgrade, materials_json, modifiers_text FROM graded_blueprints "
         f"WHERE lower(module_name) IN ({_in_marks(names)}) AND grade = ?", (*names, grade))
     candidates = [{"fdname": "", "upgrade_name": r["upgrade"], "row": r} for r in rows]
-    hits = _blueprint_name_matches(candidates, upgrade_name)
+    hits = _blueprint_name_matches(candidates, upgrade_name, module_words=_module_words(conn, groups, module_name))
     return hits[0]["row"] if len(hits) == 1 else None
 
 
@@ -319,7 +339,7 @@ def get_blueprint(module_name: str, upgrade_name: str, grade: int) -> dict:
         if not known:
             return {"found": False, **base, "reason": f"{module_name} has no engineering blueprints in Ellie's data."}
         offered = sorted({r["upgrade_name"] for r in known})
-        hits = _blueprint_name_matches(known, upgrade_name)
+        hits = _blueprint_name_matches(known, upgrade_name, module_words=_module_words(conn, groups, module_name))
         if len(hits) > 1:
             names = sorted({h["upgrade_name"] for h in hits})
             return {"found": False, **base, "available_upgrades": offered,
@@ -355,7 +375,7 @@ def _sheet_effect(conn, module_name, groups, effect_name):
         "SELECT module_name, effect, materials_json, modifiers_text FROM ungraded_costs "
         f"WHERE lower(module_name) IN ({_in_marks(names)})", tuple(names))
     candidates = [{"fdname": "", "upgrade_name": r["effect"], "row": r} for r in rows]
-    hits = _blueprint_name_matches(candidates, effect_name)
+    hits = _blueprint_name_matches(candidates, effect_name, module_words=_module_words(conn, groups, module_name))
     return hits[0]["row"] if len(hits) == 1 else None
 
 
@@ -414,7 +434,8 @@ def get_experimental_effect(module_name: str, effect_name: str) -> dict:
         if not rows:
             return {"found": False, **base, "reason": f"{module_name} has no experimental effects in Ellie's data."}
         offered = sorted({r["name"] for r in rows})
-        hits = _blueprint_name_matches([{"fdname": r["edname"], "upgrade_name": r["name"]} for r in rows], effect_name)
+        hits = _blueprint_name_matches([{"fdname": r["edname"], "upgrade_name": r["name"]} for r in rows], effect_name,
+                                       module_words=_module_words(conn, groups, module_name), use_tail=False)
         if len(hits) > 1:
             costs = [_special_cost(conn, h["fdname"])["materials"] for h in hits]
             if all(c == costs[0] for c in costs):      # Coriolis lists some effects twice (Mass Lock Munition on torpedo pylons)
@@ -1350,7 +1371,7 @@ def _kind_mismatch_reason(module_group, grp, module_kind, slot_kind, target_slot
     return None
 
 
-def _blueprint_name_matches(rows, name):
+def _blueprint_name_matches(rows, name, module_words=None, use_tail=True):
     """The rows (anything with fdname and upgrade_name) matching a typed
     blueprint name, by the FIRST of these rules that hits anything, all
     case-insensitive:
@@ -1364,7 +1385,10 @@ def _blueprint_name_matches(rows, name):
       5. an in-game alias from blueprint_mapping.BLUEPRINT_ALIASES;
       6. every word of the display name, or of the part of the fdname after the
          underscore, appears among the typed words ('Increased FSD Range' for
-         'Increased range'); the matches with the MOST words win.
+         'Increased range'); the matches with the MOST words win. Rule 6 refuses a name with other
+         words besides those, unless `module_words` is given and holds them (or they are in
+         GENERIC_EXTRA_WORDS): 'Engine Focused' is not 'Focused' for a laser. `module_words=None` skips
+         that check (used only to explain a miss). `use_tail=False` ignores the fdname's words (effects).
     Returns every row the winning rule matched (the caller refuses an
     ambiguous result rather than picking one). A blank name matches nothing."""
     raw = name.strip().lower()
@@ -1388,10 +1412,14 @@ def _blueprint_name_matches(rows, name):
             return hits
 
     typed = name_tokens(name)
+    allowed = None if module_words is None else set(module_words) | GENERIC_EXTRA_WORDS
     scored = []
     for r in rows:
-        sizes = [len(words) for words in (name_tokens(r["upgrade_name"]), name_tokens(tail(r["fdname"]) or ""))
-                 if words and words <= typed]
+        candidates = [name_tokens(r["upgrade_name"])]
+        if use_tail:
+            candidates.append(name_tokens(tail(r["fdname"]) or ""))
+        sizes = [len(words) for words in candidates
+                 if words and words <= typed and (allowed is None or (typed - words) <= allowed)]
         if sizes:
             scored.append((max(sizes), r))
     if not scored:
@@ -1410,7 +1438,7 @@ def _find_blueprint(conn, grp, grade, blueprint_name, module_group):
         "JOIN module_blueprints mb ON mb.fdname = cb.fdname WHERE mb.grp = ? AND cb.grade = ?",
         (grp, grade),
     ).fetchall()
-    hits = _blueprint_name_matches(candidates, blueprint_name)
+    hits = _blueprint_name_matches(candidates, blueprint_name, module_words=_module_words(conn, [grp], module_group))
     if len(hits) > 1:
         # Never take the first row. Not reachable with today's data
         # (verified: 0 upgrade_name collisions within any grp's allow-list at
