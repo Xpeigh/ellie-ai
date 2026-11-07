@@ -299,3 +299,64 @@ def test_build_schema_alone_still_commits_for_existing_callers(tmp_path):
     again = sqlite3.connect(path)
     assert again.execute("SELECT COUNT(*) FROM ship_stats").fetchone()[0] > 30
     again.close()
+
+
+def test_group_names_come_from_the_module_files(tmp_path):
+    conn = _fresh_db(tmp_path)
+    count = ism.build_module_group_names(conn, str(REPO))
+    conn.commit()
+    assert count > 80                                                    # 96 on the data of 2026-11-06
+
+    def names(grp):
+        return {r[0] for r in conn.execute("SELECT name FROM module_group_names WHERE grp = ?", (grp,))}
+
+    assert "frame shift drive" in names("fsd")
+    assert {"thrusters", "thruster"} <= names("t")                      # a trailing plural is also stored singular
+    assert {"collector limpet controllers", "collector limpet controller"} <= names("cc")
+    assert "power plant" in names("pp") and "life support" in names("ls")
+    assert "sensors" in names("s")
+
+
+def test_every_group_with_blueprints_has_a_name_except_ship_armour(tmp_path):
+    """Measured on the real data: 43 of the 44 groups with blueprints take their name from
+    a module file; ship armour (bh) has no module file and is named by a synonym instead."""
+    conn = _fresh_db(tmp_path)
+    ism.build_module_blueprints(conn, str(REPO))
+    ism.build_module_group_names(conn, str(REPO))
+    conn.commit()
+    nameless = {r[0] for r in conn.execute(
+        "SELECT DISTINCT grp FROM module_blueprints WHERE grp NOT IN (SELECT grp FROM module_group_names)")}
+    assert nameless == {"bh"}
+
+
+def test_no_name_belongs_to_two_groups(tmp_path):
+    conn = _fresh_db(tmp_path)
+    ism.build_module_group_names(conn, str(REPO))
+    shared = conn.execute("SELECT name FROM module_group_names GROUP BY name HAVING COUNT(*) > 1").fetchall()
+    assert shared == []
+
+
+def test_module_specials_list_which_group_can_take_which_effect(tmp_path):
+    conn = _fresh_db(tmp_path)
+    count = ism.build_module_specials(conn, str(REPO))
+    conn.commit()
+    assert count > 100                                                   # 177 on the data of 2026-11-06
+
+    def specials(grp):
+        return {r[0] for r in conn.execute("SELECT edname FROM module_specials WHERE grp = ?", (grp,))}
+
+    assert "special_fsd_heavy" in specials("fsd")              # Mass Manager
+    assert "special_fsd_heavy" not in specials("t")
+    assert "special_engine_toughened" in specials("t")          # Double Braced
+    assert "special_drag_munitions" in specials("fc")
+
+
+def test_ingest_all_fills_the_new_tables_and_keeps_its_three_part_result(tmp_path):
+    conn = sqlite3.connect(str(tmp_path / "all.db"))
+    result = ism.ingest_all(conn, str(REPO))
+    assert len(result) == 3
+    for table in ("module_group_names", "module_specials"):
+        assert conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] > 0
+    again = ism.ingest_all(conn, str(REPO))                      # a rerun rebuilds, it does not duplicate
+    assert again == result
+    conn.close()

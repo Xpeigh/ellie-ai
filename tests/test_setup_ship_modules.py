@@ -1,5 +1,5 @@
 """Task 10a X5: setup.py judges the ship & module ingest "done" only when ALL
-three tables (ship_stats, module_stats, module_blueprints) have rows."""
+five tables (ship_stats, module_stats, module_blueprints, module_group_names, module_specials) have rows."""
 import sqlite3
 import sys
 from pathlib import Path
@@ -11,7 +11,7 @@ import ingest_ship_modules as ism
 import setup as setup_script
 
 REPO = Path(__file__).resolve().parent.parent / "coriolis-data"
-TABLES = ("ship_stats", "module_stats", "module_blueprints")
+TABLES = ("ship_stats", "module_stats", "module_blueprints", "module_group_names", "module_specials")
 
 
 @pytest.fixture
@@ -86,3 +86,15 @@ def test_a_missing_table_counts_as_empty_too(setup_db, monkeypatch, capsys):
     assert setup_script.setup_ship_modules() is True
     assert "module_blueprints is empty -- re-ingesting ship & module stats." in capsys.readouterr().out
     assert _count(setup_db, "module_blueprints") > 0
+
+
+def test_an_install_from_before_the_name_tables_is_repaired_without_asking(setup_db, monkeypatch, capsys):
+    conn = sqlite3.connect(str(setup_db))
+    conn.execute("DROP TABLE module_group_names")
+    conn.execute("DROP TABLE module_specials")
+    conn.commit()
+    conn.close()
+    _must_not_ask(monkeypatch)
+    assert setup_script.setup_ship_modules() is True
+    assert "module_group_names, module_specials are empty -- re-ingesting ship & module stats." in capsys.readouterr().out
+    assert _count(setup_db, "module_group_names") > 0 and _count(setup_db, "module_specials") > 0

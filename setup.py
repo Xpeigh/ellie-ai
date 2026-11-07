@@ -50,7 +50,9 @@ STEP_TABLES = {
     "Coriolis (blueprint/experimental-effect fallback data)": [
         "coriolis_blueprints", "coriolis_experimental_effects",
     ],
-    "Ship/module stats (loadout calculator)": ["ship_stats", "module_stats", "module_blueprints"],
+    "Ship/module stats (loadout calculator)": [
+        "ship_stats", "module_stats", "module_blueprints", "module_group_names", "module_specials",
+    ],
     "EDSM (system distances)": [
         "edsm_systems", "edsm_stations",
     ],
@@ -194,12 +196,12 @@ def setup_coriolis():
 
 def setup_ship_modules():
     _heading("Ship & module stats (loadout calculator)")
-    tables = ("ship_stats", "module_stats", "module_blueprints")
+    tables = ("ship_stats", "module_stats", "module_blueprints", "module_group_names", "module_specials")
     counts = {t: _table_count(t) for t in tables}
     empty = [t for t, n in counts.items() if not n]
     if not empty:
-        print("ship_stats, module_stats and module_blueprints already have "
-              + ", ".join(f"{counts[t]}" for t in tables) + " rows.")
+        print("The ship & module tables already have rows ("
+              + ", ".join(f"{t} {counts[t]}" for t in tables) + ").")
         if not _ask_yes_no("Re-ingest anyway?", default=False):
             print("Skipped.")
             return True

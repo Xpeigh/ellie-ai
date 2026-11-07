@@ -80,6 +80,22 @@ def build_schema(conn, commit=True):
         )
         """
     )
+    # Two more IF NOT EXISTS tables, for the same reason as module_blueprints: an
+    # install that has the older tables gets these from this script, never lost to a DROP.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS module_group_names (
+            grp TEXT, name TEXT, PRIMARY KEY (grp, name)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS module_specials (
+            grp TEXT, edname TEXT, PRIMARY KEY (grp, edname)
+        )
+        """
+    )
     if commit:
         conn.commit()
 
@@ -212,8 +228,54 @@ def build_module_blueprints(conn, repo_path, commit=True):
     return count
 
 
+def _stem_names(stem):
+    """'frame_shift_drive' -> {'frame shift drive'}. A trailing plural ('thrusters',
+    'collector_limpet_controllers') is also stored singular, because players say both."""
+    name = " ".join(stem.lower().split("_"))
+    names = {name}
+    if name.endswith("s") and not name.endswith("ss"):
+        names.add(name[:-1])
+    return names
+
+
+def build_module_group_names(conn, repo_path, commit=True):
+    """Each module group's name, taken from the file its modules live in
+    (modules/*/frame_shift_drive.json -> 'frame shift drive'), so a group Coriolis adds
+    later gets a name after the next ingest with no code change. Clears and rebuilds."""
+    conn.execute("DELETE FROM module_group_names")
+    count = 0
+    for subdir in MODULE_DIRS:
+        module_dir = Path(repo_path) / "modules" / subdir
+        if not module_dir.is_dir():
+            raise FileNotFoundError(f"coriolis-data input folder not found: {module_dir}")
+        for path in sorted(module_dir.glob("*.json")):
+            data = json.load(open(path, encoding="utf-8"))
+            groups = {m.get("grp") for variants in data.values() if isinstance(variants, list)
+                      for m in variants if m.get("grp")}
+            for grp in groups:
+                for name in _stem_names(path.stem):
+                    count += conn.execute("INSERT OR IGNORE INTO module_group_names VALUES (?,?)", (grp, name)).rowcount
+    if commit:
+        conn.commit()
+    return count
+
+
+def build_module_specials(conn, repo_path, commit=True):
+    """Which experimental effects (specials) each group can take, from the same
+    modifications/modules.json as the blueprint allow-list. Clears and rebuilds."""
+    data = json.load(open(Path(repo_path) / "modifications" / "modules.json", encoding="utf-8"))
+    conn.execute("DELETE FROM module_specials")
+    count = 0
+    for grp, entry in data.items():
+        for edname in (entry.get("specials") or []):
+            count += conn.execute("INSERT OR IGNORE INTO module_specials VALUES (?,?)", (grp, edname)).rowcount
+    if commit:
+        conn.commit()
+    return count
+
+
 def ingest_all(conn, repo_path):
-    """Rebuild ship_stats, module_stats and module_blueprints from coriolis-data
+    """Rebuild ship_stats, module_stats, module_blueprints, module_group_names and module_specials from coriolis-data
     as ONE transaction, after checking that every input exists. A failure part
     way (a bad file, a full disk) rolls everything back, so the previous three
     tables are still there, complete, instead of a half-built set. Returns
@@ -225,6 +287,8 @@ def ingest_all(conn, repo_path):
         ship_count = build_ships(conn, repo_path, commit=False)
         module_count = build_modules(conn, repo_path, commit=False)
         blueprint_count = build_module_blueprints(conn, repo_path, commit=False)
+        build_module_group_names(conn, repo_path, commit=False)
+        build_module_specials(conn, repo_path, commit=False)
         conn.commit()
     except BaseException:
         conn.rollback()
