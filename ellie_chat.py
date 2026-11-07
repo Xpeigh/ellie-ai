@@ -95,12 +95,12 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "get_blueprint",
-            "description": "Get the materials required for a specific ship module blueprint upgrade at a given grade (1-5).",
+            "description": "Get the materials ONE roll of an engineering blueprint costs at a given grade (1-5), for any module: frame shift drive, thrusters, power plant, power distributor, life support, sensors, shield generator, armour, weapons, utilities and optional internals.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "module_name": {"type": "string", "description": "Module name, e.g. 'Beam Laser', 'Power Plant'"},
-                    "upgrade_name": {"type": "string", "description": "Blueprint/upgrade name, e.g. 'Efficient', 'Overcharged'"},
+                    "module_name": {"type": "string", "description": "Module name, e.g. 'Frame Shift Drive', 'Thrusters', 'Beam Laser'"},
+                    "upgrade_name": {"type": "string", "description": "Blueprint name, e.g. 'Increased range', 'Dirty', 'Overcharged'"},
                     "grade": {"type": "integer", "description": "Blueprint grade, 1 to 5"},
                 },
                 "required": ["module_name", "upgrade_name", "grade"],
@@ -111,12 +111,12 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "get_experimental_effect",
-            "description": "Get the materials required for an experimental effect (ungraded, single-cost modification) on a module.",
+            "description": "Get the materials an experimental effect costs each time it is applied to a module (ungraded, single cost). The effect must be one that module can take.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "module_name": {"type": "string", "description": "Module name, e.g. 'Beam Laser'"},
-                    "effect_name": {"type": "string", "description": "Experimental effect name, e.g. 'Drag Munitions', 'Auto Loader'"},
+                    "module_name": {"type": "string", "description": "Module name, e.g. 'Frame Shift Drive', 'Cannon'"},
+                    "effect_name": {"type": "string", "description": "Experimental effect name, e.g. 'Mass Manager', 'Drag Munitions'"},
                 },
                 "required": ["module_name", "effect_name"],
             },
@@ -126,13 +126,13 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "missing_materials",
-            "description": "Check which materials, if any, are missing to apply a blueprint upgrade at a given grade, compared to what the commander currently has on hand.",
+            "description": "Check which materials, if any, are missing for ONE roll of an engineering blueprint at a given grade, compared to what the commander currently has on hand.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "module_name": {"type": "string"},
-                    "upgrade_name": {"type": "string"},
-                    "grade": {"type": "integer"},
+                    "module_name": {"type": "string", "description": "Module name, e.g. 'Frame Shift Drive', 'Thrusters', 'Beam Laser'"},
+                    "upgrade_name": {"type": "string", "description": "Blueprint name, e.g. 'Increased range', 'Dirty', 'Overcharged'"},
+                    "grade": {"type": "integer", "description": "Blueprint grade, 1 to 5"},
                 },
                 "required": ["module_name", "upgrade_name", "grade"],
             },
