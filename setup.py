@@ -38,6 +38,7 @@ EDSM_FILES = {
 }
 
 XLSX_PATH = SCRIPT_DIR / "Engineers.xlsx"
+coriolis_refreshed = False   # set when this run re-ingests Coriolis; the ship step then rebuilds without asking
 MODEL = "bonsai-2:4b"
 # bonsai-2:4b runs on Ollama 0.40.6 or newer (older builds can't load it)
 BONSAI_MIN_OLLAMA = (0, 40, 6)
@@ -163,14 +164,33 @@ def ensure_live_tables():
     print("commander_status / materials_inventory / engineer_progress ready.")
 
 
+def update_coriolis_clone():
+    """git pull --ff-only in the existing clone. True when the update ran cleanly or was not
+    possible but harmless; False when it failed (the caller carries on with the copy you have)."""
+    if not (CORIOLIS_DIR / ".git").exists():
+        print("coriolis-data isn't a git clone (maybe it was downloaded as a zip), so it can't be updated here.")
+        return True
+    if shutil.which("git") is None:
+        print("git isn't on PATH -- install Git, or update the coriolis-data folder yourself, then re-run this script.")
+        return False
+    result = subprocess.run(["git", "-C", str(CORIOLIS_DIR), "pull", "--ff-only"])
+    if result.returncode != 0:
+        print("Updating coriolis-data failed -- see the error above. Continuing with the copy you have.")
+        return False
+    return True
+
+
 def setup_coriolis():
+    global coriolis_refreshed
     _heading("Coriolis data (blueprint costs)")
     existing = _table_count("coriolis_blueprints")
+    updating = False
     if existing:
         print(f"coriolis_blueprints already has {existing} rows.")
-        if not _ask_yes_no("Re-clone/re-ingest anyway?", default=False):
+        if not _ask_yes_no("Update the Coriolis data (git pull) and re-ingest it?", default=False):
             print("Skipped.")
             return True
+        updating = True
 
     if not CORIOLIS_MARKER.exists():
         if not _ask_yes_no(f"Clone {CORIOLIS_URL} into ./coriolis-data?"):
@@ -183,6 +203,8 @@ def setup_coriolis():
         if result.returncode != 0:
             print("Clone failed -- see the error above.")
             return False
+    elif updating:
+        update_coriolis_clone()
 
     sys.path.insert(0, str(SCRIPT_DIR))
     try:
@@ -191,6 +213,7 @@ def setup_coriolis():
         print(f"Missing a required package ({e}). Install everything this needs with: pip install -r requirements.txt")
         return False
     ingest_coriolis.main()
+    coriolis_refreshed = True
     return True
 
 
@@ -200,11 +223,14 @@ def setup_ship_modules():
     counts = {t: _table_count(t) for t in tables}
     empty = [t for t, n in counts.items() if not n]
     if not empty:
-        print("The ship & module tables already have rows ("
-              + ", ".join(f"{t} {counts[t]}" for t in tables) + ").")
-        if not _ask_yes_no("Re-ingest anyway?", default=False):
-            print("Skipped.")
-            return True
+        if coriolis_refreshed:
+            print("Coriolis data was just refreshed -- rebuilding the ship & module tables from it.")
+        else:
+            print("The ship & module tables already have rows ("
+                  + ", ".join(f"{t} {counts[t]}" for t in tables) + ").")
+            if not _ask_yes_no("Re-ingest anyway?", default=False):
+                print("Skipped.")
+                return True
     elif len(empty) < len(tables):
         # some of the three are filled and some aren't: a half-finished ingest,
         # not something to skip -- redo it without asking

@@ -50,3 +50,16 @@ def test_the_notes_and_caveats_are_stated_plainly():
         "i7-11700K", "RTX 5070 Ti", "0.40.13",
     ):
         assert needle in section, needle
+
+
+def test_the_readme_explains_how_to_update_after_a_game_update():
+    assert "## Updating after a game update" in README
+    assert "python setup.py" in README[README.index("## Updating after a game update"):]
+    assert "docs/blueprint-data.md" in README
+    assert "Blueprint costs come from your spreadsheet first, then fall back to Coriolis's broader" not in README
+
+
+def test_the_blueprint_data_page_exists_and_states_the_precedence_and_per_roll_costs():
+    page = (Path(__file__).resolve().parent.parent / "docs" / "blueprint-data.md").read_text(encoding="utf-8")
+    assert "per roll" in page and "sheet first" in page.lower()
+    assert "python verify_blueprints.py" in page

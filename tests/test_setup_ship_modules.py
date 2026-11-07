@@ -98,3 +98,13 @@ def test_an_install_from_before_the_name_tables_is_repaired_without_asking(setup
     assert setup_script.setup_ship_modules() is True
     assert "module_group_names, module_specials are empty -- re-ingesting ship & module stats." in capsys.readouterr().out
     assert _count(setup_db, "module_group_names") > 0 and _count(setup_db, "module_specials") > 0
+
+
+def test_after_a_coriolis_refresh_the_ship_tables_are_rebuilt_without_asking(setup_db, monkeypatch, capsys):
+    monkeypatch.setattr(setup_script, "coriolis_refreshed", True, raising=False)
+    _must_not_ask(monkeypatch)
+    before = _count(setup_db, "module_group_names")
+    assert before > 0                                           # complete tables: only the refresh makes it rebuild
+    assert setup_script.setup_ship_modules() is True
+    assert "Coriolis data was just refreshed -- rebuilding the ship & module tables from it." in capsys.readouterr().out
+    assert _count(setup_db, "module_group_names") == before

@@ -108,6 +108,13 @@ python ellie_chat.py
 
 The ingest scripts are safe to re-run at any time. They only touch their own tables.
 
+## Updating after a game update
+
+Coriolis's maintainers update their data after a patch. Run `python setup.py` again and answer yes to
+"Update the Coriolis data (git pull) and re-ingest it?": it pulls the newest data and rebuilds the cost,
+ship and module tables from it. Your live game state is never touched. Details and the `python verify_blueprints.py`
+check against your own crafts are in [docs/blueprint-data.md](docs/blueprint-data.md).
+
 ## Running the tests
 
 ```bash
@@ -123,8 +130,8 @@ Coriolis data skip, saying so, until `python setup.py` has fetched it; the rest 
 
 - `distance_to_system` only knows populated systems for the destination (the EDSM dump excludes
   systems nobody has settled). Your current system can be anywhere, as its position comes from the journal.
-- Blueprint costs come from your spreadsheet first, then fall back to Coriolis's broader
-  per-category data.
+- Blueprint costs come from your spreadsheet first, when you keep one, then from Coriolis's data, which
+  covers every engineerable module. Costs are per roll. See [docs/blueprint-data.md](docs/blueprint-data.md).
 - Ship build recommendations (mass, slots, jump range) are not implemented.
 
 ## Disclaimer
