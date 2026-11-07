@@ -18,7 +18,6 @@ import re
 import sqlite3
 from pathlib import Path
 
-from blueprint_mapping import MODULE_TO_CORIOLIS_KEYWORDS
 from blueprint_mapping import BLUEPRINT_ALIASES, GROUP_SYNONYMS, clean_material_name, name_tokens, squash
 from loadout_calc import compute_jump_range, compute_current_jump_range, apply_blueprint_delta
 
@@ -163,61 +162,183 @@ def _resolve_module_groups(conn, typed):
     return [key] if key in known else []
 
 
+_MODULE_HINT = ("Core modules she knows: frame shift drive, thrusters, power plant, power distributor, "
+                "life support, sensors, shield generator, armour; weapons, utilities and optional "
+                "internals by their usual names.")
+
+
+def _grade_number(grade):
+    try:
+        return int(grade)
+    except (TypeError, ValueError):
+        return None
+
+
+def _in_marks(values):
+    """'?,?,?' for an IN (...) list."""
+    return ",".join("?" * len(values))
+
+
+def _split_materials(materials_json):
+    """({name: qty}, [extras]) from either storage shape (the sheet's list of
+    {qty, item}, Coriolis's {name: qty}). Names lose any stray '(n)' annotation.
+    A line without a numeric quantity (the sheet's 'Needs personal research') goes in
+    `extras`, never into the counts."""
+    raw = json.loads(materials_json)
+    items = list(raw.items()) if isinstance(raw, dict) else [(m.get("item"), m.get("qty")) for m in raw if m.get("item")]
+    counted, extras = {}, []
+    for name, qty in items:
+        name = clean_material_name(name)
+        if isinstance(qty, int) and not isinstance(qty, bool):
+            counted[name] = counted.get(name, 0) + qty
+        else:
+            extras.append(name)
+    return counted, extras
+
+
 def _materials_to_dict(materials_json):
-    """Normalizes both storage shapes (Excel's list-of-{qty,item} and
-    Coriolis's dict-of-{name:qty}) into one {name: qty} dict."""
-    materials = json.loads(materials_json)
-    if isinstance(materials, dict):
-        return materials
-    return {m["item"]: m["qty"] for m in materials if m.get("item")}
+    """Removed in Task 6; kept so missing_materials and get_experimental_effect keep working until then."""
+    return _split_materials(materials_json)[0]
+
+
+def _materials_text(materials, extras):
+    text = ", ".join(f"{qty} {name}" for name, qty in materials.items())
+    if extras:
+        text += ("; also listed: " if text else "listed: ") + ", ".join(extras)
+    return text
+
+
+def _group_label(conn, grp):
+    row = conn.execute("SELECT name FROM module_group_names WHERE grp = ? ORDER BY length(name) DESC LIMIT 1", (grp,)).fetchone()
+    return row["name"].title() if row else grp
+
+
+def _grade_span(grades):
+    grades = sorted(grades)
+    if len(grades) > 1 and grades == list(range(grades[0], grades[-1] + 1)):
+        return f"{grades[0]}-{grades[-1]}"
+    return ", ".join(str(g) for g in grades)
+
+
+def _coriolis_cost(conn, fdname, grade):
+    """Coriolis's recorded cost of one roll: {"upgrade_name", "materials", "extras"}, or None."""
+    row = conn.execute("SELECT upgrade_name, materials_json FROM coriolis_blueprints WHERE fdname = ? AND grade = ?", (fdname, grade)).fetchone()
+    if row is None:
+        return None
+    materials, extras = _split_materials(row["materials_json"])
+    return {"upgrade_name": row["upgrade_name"], "materials": materials, "extras": extras}
+
+
+def _sheet_rows(conn, sql, params):
+    """Rows from one of the OPTIONAL spreadsheet tables; [] when that table was never
+    created (no Engineers.xlsx). Without this, a missing sheet table made every lookup
+    answer 'not fully set up' and never reach Coriolis."""
+    try:
+        return conn.execute(sql, params).fetchall()
+    except sqlite3.OperationalError as e:
+        if "no such table" in str(e):
+            return []
+        raise
+
+
+def _sheet_module_names(conn, table, module_name, groups):
+    """The module names (lower case) to look for in a sheet table: the name as typed,
+    plus every sheet module name that resolves to one of the same groups."""
+    wanted = {module_name.strip().lower()}
+    if groups:
+        for row in _sheet_rows(conn, f"SELECT DISTINCT module_name FROM {table} WHERE module_name IS NOT NULL", ()):
+            if set(_resolve_module_groups(conn, row["module_name"])) & set(groups):
+                wanted.add(row["module_name"].strip().lower())
+    return sorted(wanted)
+
+
+def _sheet_blueprint(conn, module_name, groups, upgrade_name, grade):
+    names = _sheet_module_names(conn, "graded_blueprints", module_name, groups)
+    rows = _sheet_rows(
+        conn,
+        "SELECT module_name, upgrade, materials_json, modifiers_text FROM graded_blueprints "
+        f"WHERE lower(module_name) IN ({_in_marks(names)}) AND grade = ?", (*names, grade))
+    candidates = [{"fdname": "", "upgrade_name": r["upgrade"], "row": r} for r in rows]
+    hits = _blueprint_name_matches(candidates, upgrade_name)
+    return hits[0]["row"] if len(hits) == 1 else None
+
+
+def _blueprint_reply(base, source, upgrade, materials, extras, effect):
+    label = f"{base['module']}, {upgrade}, grade {base['grade']}"
+    reply = {"found": True, "source": source, **base}
+    reply.update(upgrade=upgrade, materials=materials, materials_per="roll",
+                 cost_known=bool(materials or extras), effect=effect)
+    if extras:
+        reply["other_requirements"] = extras
+    if materials or extras:
+        reply["summary"] = f"{label}, per roll: {_materials_text(materials, extras)}."
+    else:
+        reply["summary"] = f"{label}: no materials are recorded for this upgrade, so its cost is not known."
+    return reply
+
+
+def _unknown_upgrade_reason(conn, module_name, upgrade_name, offered):
+    listing = f"Blueprints available for {module_name}: {', '.join(offered)}."
+    everything = conn.execute("SELECT DISTINCT fdname, upgrade_name FROM coriolis_blueprints").fetchall()
+    elsewhere = _blueprint_name_matches(everything, upgrade_name)
+    if not elsewhere:
+        return f"Ellie doesn't know a blueprint called '{upgrade_name}'. {listing}"
+    fdnames = sorted({h["fdname"] for h in elsewhere})
+    grps = [r["grp"] for r in conn.execute(
+        f"SELECT DISTINCT grp FROM module_blueprints WHERE fdname IN ({_in_marks(fdnames)}) ORDER BY grp", fdnames)]
+    labels = [_group_label(conn, g) for g in grps]
+    shown = ", ".join(labels[:8]) + (f" and {len(labels) - 8} more" if len(labels) > 8 else "")
+    return f"'{upgrade_name}' doesn't apply to {module_name}; it applies to {shown}. {listing}"
 
 
 @_needs_setup
 def get_blueprint(module_name: str, upgrade_name: str, grade: int) -> dict:
-    """Materials required for a specific module/upgrade/grade blueprint.
-    Checks the Excel sheet first (most specific), falls back to Coriolis's
-    broader category data if the sheet doesn't have this one filled in.
-    Returns {"found": False} if neither source has it."""
-    grade = int(grade)  # models don't always return args matching the declared type (e.g. "3" not 3)
+    """Materials ONE roll of a blueprint costs, for any module Coriolis knows. The
+    spreadsheet's row is used first when it has this module, upgrade and grade (the
+    owner's hand-kept data); otherwise Coriolis's. A module name resolves to its group(s);
+    the group's allow-list (module_blueprints) says which blueprints it can take; the
+    blueprint is matched by name. A miss says why and lists what does exist."""
+    module_name = str(module_name or "").strip()
+    upgrade_name = str(upgrade_name or "").strip()
+    number = _grade_number(grade)
+    base = {"module": module_name, "upgrade": upgrade_name, "grade": number if number is not None else grade}
+    if number is None:
+        return {"found": False, **base, "reason": "The grade must be a number from 1 to 5."}
+    grade = number
     conn = _connect()
     try:
-        row = conn.execute(
-            "SELECT materials_json, modifiers_text FROM graded_blueprints "
-            "WHERE lower(module_name) = lower(?) AND lower(upgrade) = lower(?) AND grade = ?",
-            (module_name, upgrade_name, grade),
-        ).fetchone()
-        if row:
-            return {
-                "found": True,
-                "source": "excel",
-                "module": module_name,
-                "upgrade": upgrade_name,
-                "grade": grade,
-                "materials": _materials_to_dict(row["materials_json"]),
-                "effect": row["modifiers_text"],
-            }
-
-        keywords = MODULE_TO_CORIOLIS_KEYWORDS.get(module_name)
-        if keywords:
-            candidates = conn.execute(
-                "SELECT applies_to, materials_json, feature_ranges_json FROM coriolis_blueprints "
-                "WHERE grade = ? AND lower(upgrade_name) = lower(?)",
-                (grade, upgrade_name),
-            ).fetchall()
-            for c in candidates:
-                if any(kw in c["applies_to"].lower() for kw in keywords):
-                    return {
-                        "found": True,
-                        "source": "coriolis",
-                        "module": module_name,
-                        "upgrade": upgrade_name,
-                        "grade": grade,
-                        "materials": _materials_to_dict(c["materials_json"]),
-                        "effect": None,  # Coriolis gives numeric feature ranges, not descriptive text
-                    }
+        groups = _resolve_module_groups(conn, module_name)
+        sheet = _sheet_blueprint(conn, module_name, groups, upgrade_name, grade)
+        if sheet is not None:
+            materials, extras = _split_materials(sheet["materials_json"])
+            return _blueprint_reply(base, "excel", sheet["upgrade"], materials, extras, sheet["modifiers_text"])
+        if not groups:
+            return {"found": False, **base, "reason": f"Ellie doesn't know a module called '{module_name}'. {_MODULE_HINT}"}
+        allowed = [r["fdname"] for r in conn.execute(
+            f"SELECT DISTINCT fdname FROM module_blueprints WHERE grp IN ({_in_marks(groups)})", groups)]
+        known = conn.execute(
+            f"SELECT DISTINCT fdname, upgrade_name FROM coriolis_blueprints WHERE fdname IN ({_in_marks(allowed)})", allowed).fetchall() if allowed else []
+        if not known:
+            return {"found": False, **base, "reason": f"{module_name} has no engineering blueprints in Ellie's data."}
+        offered = sorted({r["upgrade_name"] for r in known})
+        hits = _blueprint_name_matches(known, upgrade_name)
+        if len(hits) > 1:
+            names = sorted({h["upgrade_name"] for h in hits})
+            return {"found": False, **base, "available_upgrades": offered,
+                    "reason": f"'{upgrade_name}' could mean more than one blueprint for {module_name}: {', '.join(names)}. Ask which one."}
+        if not hits:
+            return {"found": False, **base, "available_upgrades": offered,
+                    "reason": _unknown_upgrade_reason(conn, module_name, upgrade_name, offered)}
+        fdname = hits[0]["fdname"]
+        grades = sorted(r["grade"] for r in conn.execute("SELECT grade FROM coriolis_blueprints WHERE fdname = ?", (fdname,)))
+        if grade not in grades:
+            plural = "s" if len(grades) > 1 else ""
+            return {"found": False, **base, "available_grades": grades,
+                    "reason": f"{hits[0]['upgrade_name']} for {module_name} is offered at grade{plural} {_grade_span(grades)}, not grade {grade}."}
+        cost = _coriolis_cost(conn, fdname, grade)
+        return _blueprint_reply(base, "coriolis", cost["upgrade_name"], cost["materials"], cost["extras"], None)
     finally:
         conn.close()
-    return {"found": False, "module": module_name, "upgrade": upgrade_name, "grade": grade}
 
 
 @_needs_setup

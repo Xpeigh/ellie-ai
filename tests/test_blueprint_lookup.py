@@ -86,3 +86,145 @@ def test_an_earlier_rule_always_beats_the_word_rule():
     rows = [{"fdname": "X_Shielded", "upgrade_name": "Shielded"},
             {"fdname": "X_ShieldedPlus", "upgrade_name": "Shielded plus"}]
     assert [r["fdname"] for r in qf._blueprint_name_matches(rows, "Shielded plus")] == ["X_ShieldedPlus"]
+
+
+import json
+
+import ingest_excel as ie
+
+
+def _add_sheet(path, blueprint_rows=(), cost_rows=()):
+    """Create the spreadsheet tables in a test database and fill them."""
+    conn = sqlite3.connect(path)
+    ie.build_schema(conn)
+    for row in blueprint_rows:
+        conn.execute("INSERT INTO graded_blueprints VALUES (?,?,?,?,?,?)", row)
+    for row in cost_rows:
+        conn.execute("INSERT INTO ungraded_costs VALUES (?,?,?,?,?)", row)
+    conn.commit()
+    conn.close()
+
+
+def test_a_database_with_no_spreadsheet_tables_still_answers_from_coriolis(coriolis_db):
+    r = qf.get_blueprint("Frame Shift Drive", "Increased range", 5)
+    assert r["found"] is True and r["source"] == "coriolis"
+    assert r["materials"] == {"Arsenic": 1, "Chemical Manipulators": 1, "Datamined Wake Exceptions": 1}
+    assert r["materials_per"] == "roll" and r["cost_known"] is True and r["grade"] == 5
+    assert r["summary"] == ("Frame Shift Drive, Increased range, grade 5, per roll: "
+                            "1 Arsenic, 1 Chemical Manipulators, 1 Datamined Wake Exceptions.")
+
+
+def test_the_player_s_words_work_for_the_module_and_the_blueprint(coriolis_db):
+    a = qf.get_blueprint("FSD", "Increased FSD Range", 5)
+    b = qf.get_blueprint("frame shift drive", "FSD_LongRange", "5")
+    assert a["materials"] == b["materials"] == {"Arsenic": 1, "Chemical Manipulators": 1, "Datamined Wake Exceptions": 1}
+    t = qf.get_blueprint("Thrusters", "Dirty Drive Tuning", 3)
+    assert t["materials"] == {"Chromium": 1, "Mechanical Components": 1, "Specialised Legacy Firmware": 1}
+    assert qf.get_blueprint("Thrusters", "Drive Strengthening", 1)["upgrade"] == "Reinforced"
+
+
+def test_an_unrecorded_cost_is_not_reported_as_free(coriolis_db):
+    r = qf.get_blueprint("Cargo Rack", "Expanded Capacity", 5)
+    assert r["found"] is True and r["materials"] == {} and r["cost_known"] is False
+    assert r["summary"] == "Cargo Rack, Expanded Capacity, grade 5: no materials are recorded for this upgrade, so its cost is not known."
+
+
+def test_a_grade_the_blueprint_does_not_have_names_the_grades_it_does(coriolis_db):
+    r = qf.get_blueprint("Frame Shift Drive", "Increased range", 6)
+    assert r["found"] is False and r["available_grades"] == [1, 2, 3, 4, 5]
+    assert r["reason"] == "Increased range for Frame Shift Drive is offered at grades 1-5, not grade 6."
+    assert "offered at grades 1-4, not grade 5" in qf.get_blueprint("Shield Cell Bank", "Rapid charge", 5)["reason"]
+    assert qf.get_blueprint("Frame Shift Drive", "Increased range", 0)["reason"].endswith("not grade 0.")
+
+
+@pytest.mark.parametrize("grade", ["five", None, "", [], {}])
+def test_a_grade_that_is_not_a_number_gets_a_plain_reply(coriolis_db, grade):
+    r = qf.get_blueprint("Frame Shift Drive", "Increased range", grade)
+    assert r["found"] is False and r["reason"] == "The grade must be a number from 1 to 5."
+
+
+def test_a_blueprint_that_belongs_to_another_module_says_where_it_applies(coriolis_db):
+    r = qf.get_blueprint("Thrusters", "Increased range", 3)
+    assert r["found"] is False
+    assert r["reason"] == ("'Increased range' doesn't apply to Thrusters; it applies to Frame Shift Drive. "
+                           "Blueprints available for Thrusters: Clean, Dirty, Reinforced.")
+    assert r["available_upgrades"] == ["Clean", "Dirty", "Reinforced"]
+
+
+def test_an_unknown_blueprint_for_a_known_module_lists_the_real_ones(coriolis_db):
+    r = qf.get_blueprint("Frame Shift Drive", "Turbo", 2)
+    assert r["found"] is False and r["available_upgrades"] == ["Faster boot sequence", "Increased range", "Shielded"]
+    assert r["reason"] == ("Ellie doesn't know a blueprint called 'Turbo'. "
+                           "Blueprints available for Frame Shift Drive: Faster boot sequence, Increased range, Shielded.")
+
+
+def test_an_unknown_module_and_a_module_with_no_blueprints(coriolis_db):
+    r = qf.get_blueprint("xyzzy", "Dirty", 1)
+    assert r["found"] is False and r["reason"].startswith("Ellie doesn't know a module called 'xyzzy'. Core modules she knows:")
+    r = qf.get_blueprint("Module Reinforcement Package", "Dirty", 1)
+    assert r["found"] is False and r["reason"] == "Module Reinforcement Package has no engineering blueprints in Ellie's data."
+
+
+@pytest.mark.parametrize("module, upgrade", [("", ""), ("   ", "Dirty"), ("Thrusters", ""), (None, None), (5, 7)])
+def test_blank_or_odd_arguments_give_a_clean_reply_not_an_exception(coriolis_db, module, upgrade):
+    r = qf.get_blueprint(module, upgrade, 1)
+    assert r["found"] is False and isinstance(r["reason"], str) and r["reason"]
+
+
+def test_every_coriolis_blueprint_and_grade_is_reachable_by_name(coriolis_db):
+    """The reachability test from the spec: every (group, blueprint, grade) in Coriolis is found
+    by the module's own name, three ways of typing the blueprint, and has Coriolis's cost."""
+    conn = _conn(coriolis_db)
+    failures = []
+    checked = 0
+    try:
+        groups = [r[0] for r in conn.execute("SELECT DISTINCT grp FROM module_blueprints ORDER BY grp")]
+        for grp in groups:
+            module = (conn.execute("SELECT name FROM module_group_names WHERE grp = ? ORDER BY length(name) DESC", (grp,)).fetchone()
+                      or {"name": {"bh": "armour"}.get(grp, grp)})["name"]
+            for (fdname,) in conn.execute("SELECT fdname FROM module_blueprints WHERE grp = ?", (grp,)).fetchall():
+                rows = conn.execute("SELECT upgrade_name, grade, materials_json FROM coriolis_blueprints WHERE fdname = ?", (fdname,)).fetchall()
+                if not rows:
+                    failures.append((grp, fdname, "in modules.json but not in blueprints.json"))
+                    continue
+                for row in rows:
+                    for typed in (row["upgrade_name"], f"{row['upgrade_name']} {module}", fdname):
+                        checked += 1
+                        got = qf.get_blueprint(module, typed, row["grade"])
+                        want = json.loads(row["materials_json"])
+                        if not got["found"] or got["materials"] != want:
+                            failures.append((grp, fdname, row["grade"], typed, got.get("reason") or got.get("materials")))
+    finally:
+        conn.close()
+    assert checked > 1500
+    assert failures == []
+
+
+def test_the_spreadsheet_row_wins_when_it_has_the_module_upgrade_and_grade(coriolis_db):
+    _add_sheet(coriolis_db, blueprint_rows=[(
+        "core_internal", "Frame Shift Drive", "Increased range", 5,
+        json.dumps([{"qty": 2, "item": "Arsenic"}]), "More jump range")])
+    r = qf.get_blueprint("FSD", "Increased FSD Range", 5)         # found through a different spelling of both names
+    assert r["source"] == "excel" and r["materials"] == {"Arsenic": 2} and r["effect"] == "More jump range"
+    assert qf.get_blueprint("FSD", "Increased range", 4)["source"] == "coriolis"      # no sheet row for grade 4
+
+
+def test_sheet_annotations_never_show_and_a_line_without_a_quantity_is_reported_apart(coriolis_db):
+    _add_sheet(coriolis_db, blueprint_rows=[(
+        "optional_internal", "Fuel Scoop", "Shielded", 3,
+        json.dumps([{"qty": 1, "item": "Conductive Polymers (0)"}, {"qty": 5, "item": "Merc Coin"},
+                    {"qty": None, "item": "Needs personal research"}]), None)])
+    r = qf.get_blueprint("Fuel Scoop", "Shielded", 3)
+    assert r["source"] == "excel" and r["materials"] == {"Conductive Polymers": 1, "Merc Coin": 5}
+    assert r["other_requirements"] == ["Needs personal research"]
+    assert r["summary"] == ("Fuel Scoop, Shielded, grade 3, per roll: 1 Conductive Polymers, 5 Merc Coin; "
+                            "also listed: Needs personal research.")
+
+
+def test_a_database_from_before_this_change_gets_the_setup_message(coriolis_db):
+    conn = sqlite3.connect(coriolis_db)
+    conn.execute("DROP TABLE module_group_names")
+    conn.commit()
+    conn.close()
+    r = qf.get_blueprint("Frame Shift Drive", "Increased range", 5)
+    assert r["found"] is False and "python setup.py" in r["reason"]
