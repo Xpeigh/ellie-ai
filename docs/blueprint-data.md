@@ -90,4 +90,7 @@ Everything else in the journal (all 48 blueprint-and-grade combinations and the 
 blueprint on every module you crafted) agrees with Coriolis. If Coriolis fixes an entry, the correction either
 becomes redundant (harmless) or no longer matches, and `python setup.py` says so ("corrections: N of M applied").
 
+`python setup.py` re-applies the corrections on every run, so they reach an existing install even if you skip the
+Coriolis update.
+
 A draft report for Coriolis's maintainers is in [upstream-coriolis-report.md](upstream-coriolis-report.md).

@@ -262,6 +262,16 @@ def build_module_group_names(conn, repo_path, commit=True):
     return count
 
 
+def apply_effect_corrections(conn, corrections=None):
+    """Add the groups the commander's own crafts proved to module_specials (blueprint_corrections.json,
+    "allowed_effects"). Idempotent. Returns how many rows were new."""
+    added = 0
+    for entry in (corrections if corrections is not None else bm.load_corrections()).get("allowed_effects", []):
+        for grp in entry["groups"]:
+            added += conn.execute("INSERT OR IGNORE INTO module_specials VALUES (?,?)", (grp, entry["edname"])).rowcount
+    return added
+
+
 def build_module_specials(conn, repo_path, commit=True, corrections=None):
     """Which experimental effects (specials) each group can take, from the same
     modifications/modules.json as the blueprint allow-list, plus the groups the commander's own
@@ -272,9 +282,7 @@ def build_module_specials(conn, repo_path, commit=True, corrections=None):
     for grp, entry in data.items():
         for edname in (entry.get("specials") or []):
             count += conn.execute("INSERT OR IGNORE INTO module_specials VALUES (?,?)", (grp, edname)).rowcount
-    for entry in (corrections if corrections is not None else bm.load_corrections()).get("allowed_effects", []):
-        for grp in entry["groups"]:
-            count += conn.execute("INSERT OR IGNORE INTO module_specials VALUES (?,?)", (grp, entry["edname"])).rowcount
+    count += apply_effect_corrections(conn, corrections)
     if commit:
         conn.commit()
     return count

@@ -264,6 +264,37 @@ def setup_ship_modules():
     return True
 
 
+def setup_corrections():
+    """Apply blueprint_corrections.json to the database on EVERY run (it is idempotent and cheap), so a
+    correction reaches an existing install even when the commander declines the Coriolis update."""
+    _heading("Corrections to Coriolis (from your own crafts)")
+    if not _table_count("coriolis_blueprints"):
+        print("Coriolis data isn't loaded yet -- nothing to correct.")
+        return False
+    sys.path.insert(0, str(SCRIPT_DIR))
+    try:
+        import blueprint_mapping
+        import ingest_coriolis
+        import ingest_ship_modules
+    except ImportError as e:
+        print(f"Missing a required package ({e}). Install everything this needs with: pip install -r requirements.txt")
+        return False
+    corrections = blueprint_mapping.load_corrections()
+    wanted = len(corrections["graded"]) + len(corrections["experimental"])
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        applied = ingest_coriolis.apply_corrections(conn, corrections)
+        has_specials = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='module_specials'").fetchone()
+        if has_specials:
+            ingest_ship_modules.apply_effect_corrections(conn, corrections)
+        conn.commit()
+    finally:
+        conn.close()
+    print(f"corrections: {applied} of {wanted} applied"
+          + ("" if applied == wanted else " -- some no longer match Coriolis; check blueprint_corrections.json"))
+    return True
+
+
 def setup_edsm():
     _heading("EDSM data (system distances)")
     existing = _table_count("edsm_systems")
@@ -344,6 +375,7 @@ def main():
     check_ollama()
     setup_coriolis()
     setup_ship_modules()
+    setup_corrections()
     setup_edsm()
     setup_excel()
     verify()
