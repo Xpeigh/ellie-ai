@@ -90,3 +90,68 @@ def test_the_chosen_engineer():
     assert (best["name"], mode) == ("F", "rank_unknown")                            # unlocked, but the journal gave no rank
     assert qf._choose_engineer([offer("E", "known", None, False)], 5) == (None, "none_unlocked")
     assert qf._choose_engineer([], 5) == (None, "no_engineer")
+
+
+def _fit(path, slot, item, blueprint=None, level=None):
+    conn = sqlite3.connect(path)
+    conn.execute("INSERT OR REPLACE INTO current_loadout_modules VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                 (slot, item, 1, 1, 1.0, 0, blueprint, level, None, None, None, "2026-11-08T00:00:00Z"))
+    conn.commit()
+    conn.close()
+
+
+FSD = "int_hyperdrive_overcharge_size5_class5"
+LASER = "hpt_pulselaser_gimbal_medium"
+
+
+def _start(path, module, fdname, stated=None):
+    conn = _conn(path)
+    try:
+        return qf._start_grade(conn, qf._resolve_module_groups(conn, module), fdname, stated)
+    finally:
+        conn.close()
+
+
+def test_a_stated_grade_wins_over_the_fitted_one(coriolis_db):
+    _fit(coriolis_db, "FrameShiftDrive", FSD, "FSD_LongRange", 3)
+    assert _start(coriolis_db, "FSD", "FSD_LongRange", 1) == (1, "stated", None)
+    assert _start(coriolis_db, "FSD", "FSD_LongRange", 0) == (0, "stated", None)
+
+
+def test_the_fitted_modules_with_this_modification_gives_its_level(coriolis_db):
+    _fit(coriolis_db, "FrameShiftDrive", FSD, "FSD_LongRange", 3)
+    assert _start(coriolis_db, "FSD", "FSD_LongRange") == (3, "fitted module", None)
+    assert _start(coriolis_db, "FSD", "fsd_longrange") == (3, "fitted module", None)       # the journal's casing is not trusted
+
+
+def test_a_fitted_module_with_another_modification_starts_from_scratch_and_says_so(coriolis_db):
+    _fit(coriolis_db, "FrameShiftDrive", FSD, "FSD_FastBoot", 2)
+    grade, source, note = _start(coriolis_db, "FSD", "FSD_LongRange")
+    assert (grade, source) == (0, "from scratch") and "replaces it" in note
+
+
+def test_a_fitted_unengineered_module_starts_at_grade_0_and_says_so(coriolis_db):
+    _fit(coriolis_db, "FrameShiftDrive", FSD)
+    grade, source, note = _start(coriolis_db, "FSD", "FSD_LongRange")
+    assert (grade, source) == (0, "fitted module") and "unengineered" in note
+
+
+def test_several_fitted_modules_start_from_scratch_and_name_the_slots(coriolis_db):
+    _fit(coriolis_db, "MediumHardpoint1", LASER, "Weapon_Efficient", 2)
+    _fit(coriolis_db, "MediumHardpoint2", LASER)
+    grade, source, note = _start(coriolis_db, "pulse laser", "Weapon_Efficient")
+    assert (grade, source) == (0, "from scratch")
+    assert "MediumHardpoint1, MediumHardpoint2" in note and "from grade N" in note
+
+
+def test_nothing_fitted_or_no_loadout_starts_from_scratch(coriolis_db):
+    grade, source, note = _start(coriolis_db, "FSD", "FSD_LongRange")
+    assert (grade, source) == (0, "from scratch") and "no loadout has been captured" in note
+
+
+def test_an_install_without_the_loadout_tables_still_starts_from_scratch(coriolis_db):
+    conn = sqlite3.connect(coriolis_db)
+    conn.execute("DROP TABLE current_loadout_modules")
+    conn.commit()
+    conn.close()
+    assert _start(coriolis_db, "FSD", "FSD_LongRange")[:2] == (0, "from scratch")

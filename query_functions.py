@@ -705,6 +705,36 @@ def _choose_engineer(offers, target):
     return None, ("none_unlocked" if offers else "no_engineer")
 
 
+def _start_grade(conn, groups, fdname, stated):
+    """(grade, source, note): the grade an upgrade starts from. A stated grade wins. Otherwise: exactly one
+    fitted module of the group that carries this blueprint gives its level; every other case starts from
+    an unengineered module (grade 0) and the note says why and what to say instead."""
+    if stated is not None:
+        return stated, "stated", None
+    fitted = []
+    if groups:
+        try:
+            fitted = conn.execute(
+                "SELECT m.slot, m.engineering_blueprint, m.engineering_level FROM current_loadout_modules m "
+                f"JOIN module_stats s ON s.symbol = lower(m.item) WHERE s.grp IN ({_in_marks(groups)}) ORDER BY m.slot", groups).fetchall()
+        except sqlite3.OperationalError as e:
+            if "no such table" not in str(e):
+                raise
+    if not fitted:
+        return 0, "from scratch", ("Nothing of this kind is fitted on your current ship, or no loadout has been captured yet, "
+                                   "so this starts from an unengineered module. Say 'from grade N' if yours is already engineered.")
+    if len(fitted) > 1:
+        slots = ", ".join(r["slot"] for r in fitted)
+        return 0, "from scratch", (f"You have {len(fitted)} of these fitted ({slots}), so this starts from an unengineered module. "
+                                   "Say 'from grade N' for the one you mean.")
+    row = fitted[0]
+    if row["engineering_blueprint"] and row["engineering_blueprint"].lower() == fdname.lower():
+        return int(row["engineering_level"] or 0), "fitted module", None
+    if row["engineering_blueprint"]:
+        return 0, "from scratch", "Your fitted one carries a different modification; a new one replaces it, so this starts from grade 1."
+    return 0, "fitted module", "Your fitted one is unengineered, so this starts from grade 1."
+
+
 @_needs_setup
 def get_material_count(material_name: str) -> dict:
     """Exact on-hand count for ONE specific material, by exact name. Use
