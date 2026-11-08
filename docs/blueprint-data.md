@@ -94,3 +94,13 @@ becomes redundant (harmless) or no longer matches, and `python setup.py` says so
 Coriolis update.
 
 A draft report for Coriolis's maintainers is in [upstream-coriolis-report.md](upstream-coriolis-report.md).
+
+## Plans and the rolls table
+
+`plan_upgrade` answers "what do I need to take this module to grade N?". It multiplies the per-roll costs above by the rolls each grade takes. An engineer at **rank 5** makes every upgrade N rolls for grade N (grade 5 included, a rule). Below rank 5, grades 1 to 4 took about 4 rolls each in the owner's journal (grade 1 varies between 3 and 5, so Ellie says so). The rank used is the chosen engineer's current rank, taken from your journal; with nobody unlocked Ellie assumes the rank-5 engineer you will need and says so. The figures live in `engineering_rolls.json`; to check them against your own play:
+
+```bash
+python rolls_from_journal.py
+```
+
+prints the table your journal produces. Engineers per blueprint and grade come from Coriolis; Coriolis misspells "Felicity Farseer" in nine lists, which Ellie corrects.

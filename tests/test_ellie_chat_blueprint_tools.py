@@ -16,7 +16,7 @@ def test_get_blueprint_says_per_roll_and_covers_the_core_modules():
         "module: a frame shift drive, thrusters, a power plant, a shield generator, or a particular "
         "weapon, utility or optional internal.")
     props = tool["parameters"]["properties"]
-    assert props["module_name"]["description"] == "Module name as the commander said it, e.g. 'Frame Shift Drive', 'Thrusters', 'Shield Generator'"
+    assert props["module_name"]["description"] == "Module name only, without any blueprint word, e.g. 'Frame Shift Drive', 'Thrusters', 'Shield Generator'"
     assert props["upgrade_name"]["description"] == "Blueprint name, e.g. 'Increased range', 'Dirty', 'Overcharged'"
 
 
@@ -26,7 +26,7 @@ def test_missing_materials_describes_one_roll_and_its_arguments():
         "Check which materials, if any, are missing for ONE roll of an engineering blueprint at a given grade, "
         "compared to what the commander currently has on hand.")
     props = tool["parameters"]["properties"]
-    assert props["module_name"]["description"] == "Module name as the commander said it, e.g. 'Frame Shift Drive', 'Thrusters', 'Shield Generator'"
+    assert props["module_name"]["description"] == "Module name only, without any blueprint word, e.g. 'Frame Shift Drive', 'Thrusters', 'Shield Generator'"
     assert props["upgrade_name"]["description"] == "Blueprint name, e.g. 'Increased range', 'Dirty', 'Overcharged'"
     assert props["grade"]["description"] == "Blueprint grade, 1 to 5"
 

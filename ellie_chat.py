@@ -99,7 +99,7 @@ TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "module_name": {"type": "string", "description": "Module name as the commander said it, e.g. 'Frame Shift Drive', 'Thrusters', 'Shield Generator'"},
+                    "module_name": {"type": "string", "description": "Module name only, without any blueprint word, e.g. 'Frame Shift Drive', 'Thrusters', 'Shield Generator'"},
                     "upgrade_name": {"type": "string", "description": "Blueprint name, e.g. 'Increased range', 'Dirty', 'Overcharged'"},
                     "grade": {"type": "integer", "description": "Blueprint grade, 1 to 5"},
                 },
@@ -130,7 +130,7 @@ TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "module_name": {"type": "string", "description": "Module name as the commander said it, e.g. 'Frame Shift Drive', 'Thrusters', 'Shield Generator'"},
+                    "module_name": {"type": "string", "description": "Module name only, without any blueprint word, e.g. 'Frame Shift Drive', 'Thrusters', 'Shield Generator'"},
                     "upgrade_name": {"type": "string", "description": "Blueprint name, e.g. 'Increased range', 'Dirty', 'Overcharged'"},
                     "grade": {"type": "integer", "description": "Blueprint grade, 1 to 5"},
                 },
@@ -226,11 +226,11 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "plan_upgrade",
-            "description": "Plan an engineering upgrade of one specific module up to a grade (1-5): rolls per grade, total materials, what is short, and which engineers can do it.",
+            "description": "Plan taking one specific module from one grade up to a higher grade (1-5): rolls per grade, total materials, what is short, and which engineers can do it. Use this, not a single-roll lookup, when the commander asks what it takes to get a module to a grade. Also use it when the commander asks which engineers can take a module to a grade.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "module_name": {"type": "string", "description": "Module name as the commander said it, e.g. 'Frame Shift Drive', 'Thrusters', 'Shield Generator'"},
+                    "module_name": {"type": "string", "description": "Module name only, without any blueprint word, e.g. 'Frame Shift Drive', 'Thrusters', 'Shield Generator'"},
                     "upgrade_name": {"type": "string", "description": "Blueprint name, e.g. 'Increased range', 'Dirty', 'Overcharged'"},
                     "target_grade": {"type": "integer", "description": "Grade to reach, 1 to 5"},
                     "from_grade": {"type": "integer", "description": "Grade the module is at now (0 if unengineered); only when the commander says"},
