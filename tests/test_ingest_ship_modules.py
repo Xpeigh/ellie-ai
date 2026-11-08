@@ -375,3 +375,27 @@ def test_the_shipped_corrections_let_missile_racks_take_the_effects_real_crafts_
     conn.commit()
     mr = {r[0] for r in conn.execute("SELECT edname FROM module_specials WHERE grp = 'mr'")}
     assert {"special_drag_munitions", "special_thermal_cascade"} <= mr
+
+
+def test_blueprint_engineers_list_who_offers_what_at_each_grade(tmp_path):
+    conn = _fresh_db(tmp_path)
+    count = ism.build_blueprint_engineers(conn, str(REPO))
+    conn.commit()
+    assert count > 1500                                              # 1,694 on the data of 2026-11-08
+
+    def engineers(fdname, grade):
+        return {r[0] for r in conn.execute("SELECT engineer FROM blueprint_engineers WHERE fdname = ? AND grade = ?", (fdname, grade))}
+
+    assert engineers("FSD_LongRange", 5) == {"Elvira Martuuk", "Felicity Farseer", "Mel Brandon"}
+    assert "Colonel Bris Dekker" in engineers("FSD_LongRange", 1) and "Colonel Bris Dekker" not in engineers("FSD_LongRange", 4)
+    assert "Felicty Farseer" in engineers("Engine_Dirty", 3)          # Coriolis's own misspelling is stored as published
+
+
+def test_ingest_all_fills_the_engineer_table_and_a_rerun_does_not_duplicate(tmp_path):
+    conn = sqlite3.connect(str(tmp_path / "engineers.db"))
+    ism.ingest_all(conn, str(REPO))
+    first = conn.execute("SELECT COUNT(*) FROM blueprint_engineers").fetchone()[0]
+    assert first > 1500
+    ism.ingest_all(conn, str(REPO))
+    assert conn.execute("SELECT COUNT(*) FROM blueprint_engineers").fetchone()[0] == first
+    conn.close()

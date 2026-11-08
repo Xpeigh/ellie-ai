@@ -52,7 +52,7 @@ STEP_TABLES = {
         "coriolis_blueprints", "coriolis_experimental_effects",
     ],
     "Ship/module stats (loadout calculator)": [
-        "ship_stats", "module_stats", "module_blueprints", "module_group_names", "module_specials",
+        "ship_stats", "module_stats", "module_blueprints", "module_group_names", "module_specials", "blueprint_engineers",
     ],
     "EDSM (system distances)": [
         "edsm_systems", "edsm_stations",
@@ -219,7 +219,7 @@ def setup_coriolis():
 
 def setup_ship_modules():
     _heading("Ship & module stats (loadout calculator)")
-    tables = ("ship_stats", "module_stats", "module_blueprints", "module_group_names", "module_specials")
+    tables = ("ship_stats", "module_stats", "module_blueprints", "module_group_names", "module_specials", "blueprint_engineers")
     counts = {t: _table_count(t) for t in tables}
     empty = [t for t, n in counts.items() if not n]
     if not empty:

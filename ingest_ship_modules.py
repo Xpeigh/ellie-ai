@@ -98,6 +98,13 @@ def build_schema(conn, commit=True):
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS blueprint_engineers (
+            fdname TEXT, grade INTEGER, engineer TEXT, PRIMARY KEY (fdname, grade, engineer)
+        )
+        """
+    )
     if commit:
         conn.commit()
 
@@ -288,8 +295,26 @@ def build_module_specials(conn, repo_path, commit=True, corrections=None):
     return count
 
 
+def build_blueprint_engineers(conn, repo_path, commit=True):
+    """Which engineers offer each blueprint at each grade, from modifications/modules.json (the same
+    file as the allow-lists). Names are stored exactly as Coriolis spells them -- including its own
+    misspellings, which the lookups correct -- so the table mirrors the source. Clears and rebuilds."""
+    data = json.load(open(Path(repo_path) / "modifications" / "modules.json", encoding="utf-8"))
+    conn.execute("DELETE FROM blueprint_engineers")
+    count = 0
+    for entry in data.values():
+        for fdname, blueprint in (entry.get("blueprints") or {}).items():
+            for grade, detail in blueprint.get("grades", {}).items():
+                for engineer in detail.get("engineers", []):
+                    count += conn.execute("INSERT OR IGNORE INTO blueprint_engineers VALUES (?,?,?)",
+                                          (fdname, int(grade), engineer)).rowcount
+    if commit:
+        conn.commit()
+    return count
+
+
 def ingest_all(conn, repo_path):
-    """Rebuild ship_stats, module_stats, module_blueprints, module_group_names and module_specials from coriolis-data
+    """Rebuild ship_stats, module_stats, module_blueprints, module_group_names, module_specials and blueprint_engineers from coriolis-data
     as ONE transaction, after checking that every input exists. A failure part
     way (a bad file, a full disk) rolls everything back, so the previous three
     tables are still there, complete, instead of a half-built set. Returns
@@ -303,6 +328,7 @@ def ingest_all(conn, repo_path):
         blueprint_count = build_module_blueprints(conn, repo_path, commit=False)
         build_module_group_names(conn, repo_path, commit=False)
         build_module_specials(conn, repo_path, commit=False)
+        build_blueprint_engineers(conn, repo_path, commit=False)
         conn.commit()
     except BaseException:
         conn.rollback()
