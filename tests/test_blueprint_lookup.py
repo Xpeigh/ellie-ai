@@ -390,3 +390,21 @@ def test_the_modules_own_words_are_still_welcome_around_a_blueprint_name(corioli
     ]:
         r = qf.get_blueprint(module, name, 1)
         assert r["found"] is True and r["upgrade"] == upgrade, (module, name, r.get("reason"))
+
+
+def test_resolve_blueprint_gives_the_one_blueprint_or_a_miss(coriolis_db):
+    conn = _conn(coriolis_db)
+    try:
+        groups = qf._resolve_module_groups(conn, "FSD")
+        resolved, miss = qf._resolve_blueprint(conn, "FSD", "Increased FSD Range", groups)
+        assert miss is None
+        assert resolved == {"fdname": "FSD_LongRange", "upgrade_name": "Increased range", "grades": [1, 2, 3, 4, 5]}
+        resolved, miss = qf._resolve_blueprint(conn, "FSD", "Turbo", groups)
+        assert resolved is None and miss["available_upgrades"] == ["Faster boot sequence", "Increased range", "Shielded"]
+        resolved, miss = qf._resolve_blueprint(conn, "xyzzy", "Dirty", [])
+        assert resolved is None and miss["reason"].startswith("Ellie doesn't know a module called 'xyzzy'.")
+        groups = qf._resolve_module_groups(conn, "Module Reinforcement Package")
+        resolved, miss = qf._resolve_blueprint(conn, "Module Reinforcement Package", "Dirty", groups)
+        assert resolved is None and miss["reason"] == "Module Reinforcement Package has no engineering blueprints in Ellie's data."
+    finally:
+        conn.close()

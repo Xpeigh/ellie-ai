@@ -309,6 +309,31 @@ def _unknown_upgrade_reason(conn, module_name, upgrade_name, offered):
     return f"'{upgrade_name}' doesn't apply to {module_name}; it applies to {shown}. {listing}"
 
 
+def _resolve_blueprint(conn, module_name, upgrade_name, groups):
+    """(resolved, miss) for a typed module and blueprint name. `resolved` is {"fdname", "upgrade_name",
+    "grades"} for the one Coriolis blueprint they mean; `miss` is {"reason", ...} (with "available_upgrades"
+    when it helps) when they mean none, or more than one. Exactly one of the two is None."""
+    if not groups:
+        return None, {"reason": f"Ellie doesn't know a module called '{module_name}'. {_MODULE_HINT}"}
+    allowed = [r["fdname"] for r in conn.execute(
+        f"SELECT DISTINCT fdname FROM module_blueprints WHERE grp IN ({_in_marks(groups)})", groups)]
+    known = conn.execute(
+        f"SELECT DISTINCT fdname, upgrade_name FROM coriolis_blueprints WHERE fdname IN ({_in_marks(allowed)})", allowed).fetchall() if allowed else []
+    if not known:
+        return None, {"reason": f"{module_name} has no engineering blueprints in Ellie's data."}
+    offered = sorted({r["upgrade_name"] for r in known})
+    hits = _blueprint_name_matches(known, upgrade_name, module_words=_module_words(conn, groups, module_name))
+    if len(hits) > 1:
+        names = sorted({h["upgrade_name"] for h in hits})
+        return None, {"available_upgrades": offered,
+                      "reason": f"'{upgrade_name}' could mean more than one blueprint for {module_name}: {', '.join(names)}. Ask which one."}
+    if not hits:
+        return None, {"available_upgrades": offered, "reason": _unknown_upgrade_reason(conn, module_name, upgrade_name, offered)}
+    fdname = hits[0]["fdname"]
+    grades = sorted(r["grade"] for r in conn.execute("SELECT grade FROM coriolis_blueprints WHERE fdname = ?", (fdname,)))
+    return {"fdname": fdname, "upgrade_name": hits[0]["upgrade_name"], "grades": grades}, None
+
+
 @_needs_setup
 def get_blueprint(module_name: str, upgrade_name: str, grade: int) -> dict:
     """Materials ONE roll of a blueprint costs, for any module Coriolis knows. The
@@ -330,30 +355,15 @@ def get_blueprint(module_name: str, upgrade_name: str, grade: int) -> dict:
         if sheet is not None:
             materials, extras = _split_materials(sheet["materials_json"])
             return _blueprint_reply(base, "excel", sheet["upgrade"], materials, extras, sheet["modifiers_text"])
-        if not groups:
-            return {"found": False, **base, "reason": f"Ellie doesn't know a module called '{module_name}'. {_MODULE_HINT}"}
-        allowed = [r["fdname"] for r in conn.execute(
-            f"SELECT DISTINCT fdname FROM module_blueprints WHERE grp IN ({_in_marks(groups)})", groups)]
-        known = conn.execute(
-            f"SELECT DISTINCT fdname, upgrade_name FROM coriolis_blueprints WHERE fdname IN ({_in_marks(allowed)})", allowed).fetchall() if allowed else []
-        if not known:
-            return {"found": False, **base, "reason": f"{module_name} has no engineering blueprints in Ellie's data."}
-        offered = sorted({r["upgrade_name"] for r in known})
-        hits = _blueprint_name_matches(known, upgrade_name, module_words=_module_words(conn, groups, module_name))
-        if len(hits) > 1:
-            names = sorted({h["upgrade_name"] for h in hits})
-            return {"found": False, **base, "available_upgrades": offered,
-                    "reason": f"'{upgrade_name}' could mean more than one blueprint for {module_name}: {', '.join(names)}. Ask which one."}
-        if not hits:
-            return {"found": False, **base, "available_upgrades": offered,
-                    "reason": _unknown_upgrade_reason(conn, module_name, upgrade_name, offered)}
-        fdname = hits[0]["fdname"]
-        grades = sorted(r["grade"] for r in conn.execute("SELECT grade FROM coriolis_blueprints WHERE fdname = ?", (fdname,)))
+        resolved, miss = _resolve_blueprint(conn, module_name, upgrade_name, groups)
+        if miss:
+            return {"found": False, **base, **miss}
+        grades = resolved["grades"]
         if grade not in grades:
             plural = "s" if len(grades) > 1 else ""
             return {"found": False, **base, "available_grades": grades,
-                    "reason": f"{hits[0]['upgrade_name']} for {module_name} is offered at grade{plural} {_grade_span(grades)}, not grade {grade}."}
-        cost = _coriolis_cost(conn, fdname, grade)
+                    "reason": f"{resolved['upgrade_name']} for {module_name} is offered at grade{plural} {_grade_span(grades)}, not grade {grade}."}
+        cost = _coriolis_cost(conn, resolved["fdname"], grade)
         return _blueprint_reply(base, "coriolis", cost["upgrade_name"], cost["materials"], cost["extras"], None)
     finally:
         conn.close()
