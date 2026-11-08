@@ -26,10 +26,10 @@ Read-only queries on the owner's journals (574 files, 257 `EngineerCraft` events
 
 | # | Finding | Evidence |
 |---|---|---|
-| F1 | **Rolls per grade depend on the engineer's rank.** At rank 5, grade N takes N rolls. Below rank 5, grades 1 to 4 took about 4 rolls each. | Finished grades (a higher grade followed), grouped by the engineer's rank at the time (tracked from `EngineerProgress` events). Rank 5: grade 1: 1 roll (6 of 6), grade 2: 2 (6 of 6), grade 3: 3 (4 of 5, once 2), grade 4: 4 (4 of 5, once 2). Below rank 5: grade 1: 4 (5 of 9; also 3 and 5), grade 2: 4 (7 of 7), grade 3: 4 (6 of 6), grade 4: 4 (6 of 6). The owner's own rule ("n+2, grade 1 = 4" below rank 5) fits grades 1 and 2 and over-counts grades 3 and 4 (5 and 6 against 4 observed). Grade 5 appears only as the last step of a run and was 5 rolls in the runs that reached it. |
+| F1 | **Rolls per grade depend on the engineer's rank.** At rank 5, grade N takes N rolls. Below rank 5, grades 1 to 4 took about 4 rolls each. | Finished grades (a higher grade followed), grouped by the engineer's rank at the time (tracked from `EngineerProgress` events). Rank 5: grade 1: 1 roll (6 of 6), grade 2: 2 (6 of 6), grade 3: 3 (4 of 5, once 2), grade 4: 4 (4 of 5, once 2). Below rank 5: grade 1: 4 (5 of 9; also 3 and 5), grade 2: 4 (7 of 7), grade 3: 4 (6 of 6), grade 4: 4 (6 of 6). The owner's own rule ("n+2, grade 1 = 4" below rank 5) fits grades 1 and 2 and over-counts grades 3 and 4 (5 and 6 against 4 observed). Grade 5 appears only as the last step of a run and was 5 rolls in 5 of the 6 runs that reached it (one stopped after 3). |
 | F2 | **A grade is only ever crafted at or below the engineer's rank.** | 246 of 246 grade crafts with a known rank had grade <= rank. |
 | F3 | **The rank is in the journal.** | `engineer_progress` holds the stage (Known, Invited, Unlocked) and, once unlocked, the rank 1-5. The owner has 6 of 19 known engineers unlocked. |
-| F4 | **Coriolis lists the engineers per blueprint per grade.** 26 ship-module engineers. For all 179 blueprints that reach grade 5 at least one engineer offers both grade 1 and grade 5, so one engineer can carry a whole path. Of the 170 blueprints with an engineer at grade 5, 142 have two, 18 three, 10 six and 9 one. `CargoRack_IncreasedCapacity` grade 5 has none. | `modifications/modules.json`. |
+| F4 | **Coriolis lists the engineers per blueprint per grade.** 26 ship-module engineers. For all 179 blueprints that have both a grade 1 and a grade 5, at least one engineer offers both, so one engineer can carry a whole path. Of the 180 blueprints that reach grade 5, 179 have an engineer at grade 5 (142 have two, 18 three, 10 six and 9 one); `CargoRack_IncreasedCapacity` grade 5 has none. | `modifications/modules.json`. |
 | F5 | **Engineer names disagree in two places.** Coriolis writes "Felicty Farseer"; the owner's sheet writes "Coloner Bris Dekker". The journal writes Tod 'The Blaster' McQuinn with single quotes, Coriolis with double quotes (equal once punctuation is ignored). The journal also lists Odyssey suit engineers that Coriolis rightly omits. | Names compared across Coriolis, journal and sheet. |
 | F6 | **The loadout already records each fitted module's engineering.** `current_loadout_modules` has `engineering_blueprint` (the Coriolis `fdname`), `engineering_level`, `engineering_experimental`. | Table columns; this is the starting grade. |
 | F7 | **Per-roll costs and held-material matching are already correct** (part 1: 48 of 48 grade combinations equal the owner's real crafts). | Part 1. |
@@ -72,9 +72,10 @@ The reply always says which rule applied (`start_source`).
 Rolls per step come from `engineering_rolls.json`, a data file in the repository:
 
 ```json
-{"basis": "...one commander's journal, date, crafts counted...",
- "rank5":  {"1": {"typical": 1, "up_to": 1, "samples": 6}, "...": "..."},
- "below5": {"1": {"typical": 4, "up_to": 5, "samples": 9}, "...": "..."}}
+// abridged: the shipped file has every grade
+{"basis": "one commander's journal, with the date and the number of crafts counted",
+ "rank5":  {"1": {"typical": 1, "up_to": 1, "samples": 6}, "2": {"typical": 2, "up_to": 2, "samples": 6}},
+ "below5": {"1": {"typical": 4, "up_to": 5, "samples": 9}, "2": {"typical": 4, "up_to": 4, "samples": 7}}}
 ```
 
 `typical` is the most common number of rolls seen for that grade, `up_to` the largest, `samples` how many finished grades support it. A grade with fewer than 5 samples is flagged as thin evidence in the reply. There is no `below5` entry for grade 5, because the journal shows no grade above the engineer's rank (F2).
@@ -99,9 +100,9 @@ For each grade g from start+1 to target: rolls(g) from 6.3, materials(g) = Corio
 
 Found: `{"found": true, "module", "upgrade", "from_grade", "start_source", "target_grade", "rolls_basis", "steps": [{"grade", "rolls", "rolls_up_to", "per_roll": {...}}], "totals": {...}, "totals_up_to": {...}, "short": {name: {"need", "have", "short_by"}}, "engineers": [{"name", "status", "rank", "usable"}], "chosen_engineer", "thin_evidence": bool, "notes": [..], "summary"}`. Misses use the existing shape (`found: false`, `reason`, `available_upgrades`/`available_grades`).
 
-The `summary` is a short paragraph the 2-4B model can read out. Example for the owner's data (FSD, grade 3 to 5, Felicity Farseer at rank 5, per-roll costs from Coriolis):
+The `summary` is a short paragraph the 2-4B model can read out. Format example using the owner's data (FSD, grade 3 to 5, Felicity Farseer at rank 5, per-roll costs from Coriolis; the bracketed part is filled from the inventory):
 
-> Frame Shift Drive, Increased range, grade 3 to 5 (your drive is at grade 3). Felicity Farseer (unlocked, rank 5) can do it. Rolls at rank 5: grade 4: 4, grade 5: 5. You need 4 Chemical Distillery, 4 Eccentric Hyperspace Trajectories, 4 Manganese, 5 Arsenic, 5 Chemical Manipulators, 5 Datamined Wake Exceptions. You are short by: ... Extra rolls for a better result will cost more.
+> Frame Shift Drive, Increased range, grade 3 to 5 (your drive is at grade 3). Felicity Farseer (unlocked, rank 5) can do it. Rolls at rank 5: grade 4: 4, grade 5: 5. You need 4 Chemical Distillery, 4 Eccentric Hyperspace Trajectories, 4 Manganese, 5 Arsenic, 5 Chemical Manipulators, 5 Datamined Wake Exceptions. You are short by: [the shortfall from the commander's inventory, or "nothing"]. Extra rolls for a better result will cost more.
 
 ### 6.8 Limits stated plainly
 
