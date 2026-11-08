@@ -31,10 +31,10 @@ def _engineer(path, name, stage, rank=None):
     conn.close()
 
 
-def _offers(path, fdname, grade):
+def _offers(path, module, fdname, grade):
     conn = _conn(path)
     try:
-        return qf._engineers_offering(conn, fdname, grade)
+        return qf._engineers_offering(conn, qf._resolve_module_groups(conn, module), fdname, grade)
     finally:
         conn.close()
 
@@ -49,7 +49,7 @@ def test_every_coriolis_engineer_name_resolves_to_a_name_the_journal_uses(coriol
 
 
 def test_felicity_is_listed_for_dirty_drives_despite_coriolis_misspelling_her(coriolis_db):
-    names = [o["name"] for o in _offers(coriolis_db, "Engine_Dirty", 3)]
+    names = [o["name"] for o in _offers(coriolis_db, "Thrusters", "Engine_Dirty", 3)]
     assert "Felicity Farseer" in names and "Felicty Farseer" not in names
     assert names == sorted(names) and len(names) == len(set(names)) == 4
 
@@ -58,7 +58,7 @@ def test_status_and_rank_come_from_the_journal_table(coriolis_db):
     _engineer(coriolis_db, "Felicity Farseer", "Unlocked", 5)
     _engineer(coriolis_db, "Elvira Martuuk", "Invited")
     _engineer(coriolis_db, "Tod 'The Blaster' McQuinn", "Unlocked", 5)           # not an FSD engineer: must not appear
-    offers = {o["name"]: o for o in _offers(coriolis_db, "FSD_LongRange", 5)}
+    offers = {o["name"]: o for o in _offers(coriolis_db, "FSD", "FSD_LongRange", 5)}
     assert offers["Felicity Farseer"] == {"name": "Felicity Farseer", "status": "unlocked", "rank": 5, "usable": True}
     assert offers["Elvira Martuuk"] == {"name": "Elvira Martuuk", "status": "invited", "rank": None, "usable": False}
     assert offers["Mel Brandon"] == {"name": "Mel Brandon", "status": "not met", "rank": None, "usable": False}
@@ -67,13 +67,40 @@ def test_status_and_rank_come_from_the_journal_table(coriolis_db):
 
 def test_an_unlocked_engineer_below_the_target_rank_is_not_usable(coriolis_db):
     _engineer(coriolis_db, "Felicity Farseer", "Unlocked", 3)
-    assert {o["name"]: o["usable"] for o in _offers(coriolis_db, "FSD_LongRange", 3)}["Felicity Farseer"] is True
-    assert {o["name"]: o["usable"] for o in _offers(coriolis_db, "FSD_LongRange", 4)}["Felicity Farseer"] is False
+    assert {o["name"]: o["usable"] for o in _offers(coriolis_db, "FSD", "FSD_LongRange", 3)}["Felicity Farseer"] is True
+    assert {o["name"]: o["usable"] for o in _offers(coriolis_db, "FSD", "FSD_LongRange", 4)}["Felicity Farseer"] is False
 
 
 def test_an_empty_engineer_table_gives_everyone_as_not_met(coriolis_db):
-    offers = _offers(coriolis_db, "FSD_LongRange", 5)
+    offers = _offers(coriolis_db, "FSD", "FSD_LongRange", 5)
     assert [o["status"] for o in offers] == ["not met"] * 3 and not any(o["usable"] for o in offers)
+
+
+def test_engineers_are_listed_per_module_group_not_per_blueprint_name(coriolis_db):
+    """Coriolis lists engineers per module group: Weapon_LongRange is Broo Tarquin and Mel Brandon for a pulse
+    laser but Tod McQuinn and Marsha Hicks for a multi-cannon. Merging them sent players to the wrong engineer."""
+    keys = lambda module, fdname, grade: sorted(bm.engineer_key(o["name"]) for o in _offers(coriolis_db, module, fdname, grade))
+    assert keys("pulse laser", "Weapon_LongRange", 5) == sorted(bm.engineer_key(n) for n in ["Broo Tarquin", "Mel Brandon"])
+    assert keys("multi-cannon", "Weapon_LongRange", 5) == sorted(bm.engineer_key(n) for n in ["Marsha Hicks", "Tod 'The Blaster' McQuinn"])
+    assert keys("chaff launcher", "Misc_LightWeight", 3) == sorted(bm.engineer_key(n) for n in ["Petra Olmanova", "Ram Tah"])
+
+
+def test_a_plan_only_offers_and_chooses_engineers_who_do_that_module(coriolis_db):
+    _engineer(coriolis_db, "Tod 'The Blaster' McQuinn", "Unlocked", 5)          # a multi-cannon engineer
+    _engineer(coriolis_db, "Mel Brandon", "Unlocked", 5)                         # does pulse lasers too
+    plan = qf.plan_upgrade("pulse laser", "Long range", 5, from_grade=4)
+    assert [e["name"] for e in plan["engineers"]] == ["Broo Tarquin", "Mel Brandon"]
+    assert plan["chosen_engineer"] == "Mel Brandon"
+    plan = qf.plan_upgrade("chaff launcher", "Lightweight", 3, from_grade=2)
+    assert [e["name"] for e in plan["engineers"]] == ["Petra Olmanova", "Ram Tah"] and plan["chosen_engineer"] is None
+
+
+def test_a_journal_row_matches_the_engineer_even_when_coriolis_misspells_her(coriolis_db):
+    """Review Focus 5: Coriolis writes "Felicty Farseer" for the drives; the journal writes her correctly."""
+    _engineer(coriolis_db, "Felicity Farseer", "Unlocked", 5)
+    offers = {o["name"]: o for o in _offers(coriolis_db, "Thrusters", "Engine_Dirty", 3)}
+    assert offers["Felicity Farseer"] == {"name": "Felicity Farseer", "status": "unlocked", "rank": 5, "usable": True}
+    assert len(offers) == 4 and "Felicty Farseer" not in offers
 
 
 def test_the_chosen_engineer():
@@ -142,6 +169,11 @@ def test_several_fitted_modules_start_from_scratch_and_name_the_slots(coriolis_d
     grade, source, note = _start(coriolis_db, "pulse laser", "Weapon_Efficient")
     assert (grade, source) == (0, "from scratch")
     assert "MediumHardpoint1, MediumHardpoint2" in note and "from grade N" in note
+
+
+def test_a_fitted_armours_grade_is_found_although_armour_has_no_module_stats_rows(coriolis_db):
+    _fit(coriolis_db, "Armour", "python_armour_grade3", "Armour_HeavyDuty", 3)
+    assert _start(coriolis_db, "armour", "Armour_HeavyDuty") == (3, "fitted module", None)
 
 
 def test_nothing_fitted_or_no_loadout_starts_from_scratch(coriolis_db):
@@ -234,12 +266,61 @@ def test_an_unlocked_engineer_with_no_rank_yet_assumes_rank_5_and_says_so(coriol
     assert "The journal has not shown Felicity Farseer's rank yet, so the rolls below assume a rank-5 engineer." in plan["summary"]
 
 
+def test_a_usable_engineer_below_rank_5_is_planned_with_below_rank_5_rolls(coriolis_db):
+    _engineer(coriolis_db, "Felicity Farseer", "Unlocked", 4)
+    plan = qf.plan_upgrade("Frame Shift Drive", "Increased range", 3, from_grade=0)
+    assert plan["chosen_engineer"] == "Felicity Farseer" and plan["rolls_basis"] == "below rank 5"
+    assert {e["name"]: e["usable"] for e in plan["engineers"]}["Felicity Farseer"] is True
+    assert [(s["grade"], s["rolls"]) for s in plan["steps"]] == [(1, 4), (2, 4), (3, 4)]
+    assert "Felicity Farseer (unlocked, rank 4) can do it." in plan["summary"]
+
+
+def test_the_highest_ranked_usable_engineer_is_chosen_and_sets_the_rolls(coriolis_db):
+    _engineer(coriolis_db, "Felicity Farseer", "Unlocked", 4)
+    _engineer(coriolis_db, "Mel Brandon", "Unlocked", 5)
+    _engineer(coriolis_db, "Elvira Martuuk", "Unlocked", 5)
+    plan = qf.plan_upgrade("Frame Shift Drive", "Increased range", 4, from_grade=3)
+    assert plan["chosen_engineer"] == "Elvira Martuuk" and plan["rolls_basis"] == "rank 5"      # rank 5 beats rank 4; ties by name
+    assert [(s["grade"], s["rolls"]) for s in plan["steps"]] == [(4, 4)]
+
+
+def test_up_to_figures_use_the_largest_roll_count_seen_not_the_usual_one(coriolis_db):
+    _engineer(coriolis_db, "Felicity Farseer", "Unlocked", 3)
+    plan = qf.plan_upgrade("Frame Shift Drive", "Increased range", 5)
+    first = plan["steps"][0]
+    assert (first["grade"], first["rolls"], first["rolls_up_to"]) == (1, 4, 5)                  # grade 1 below rank 5 was seen at 3, 4 and 5
+    expected_up = {}
+    for step in plan["steps"]:
+        for name, qty in step["per_roll"].items():
+            expected_up[name] = expected_up.get(name, 0) + qty * step["rolls_up_to"]
+    assert plan["totals_up_to"] == expected_up and plan["totals_up_to"] != plan["totals"]
+    assert all(row["need_up_to"] == plan["totals_up_to"][name] for name, row in plan["short"].items())
+
+
+def test_no_loadout_start_note_reaches_the_plan_and_its_summary(coriolis_db):
+    plan = qf.plan_upgrade("Frame Shift Drive", "Increased range", 2)
+    assert plan["start_source"] == "from scratch" and plan["notes"][0].startswith("Nothing of this kind is fitted")
+    assert "Say 'from grade N' if yours is already engineered." in plan["summary"]
+
+
+def test_a_plan_the_commander_can_already_pay_for_says_so(coriolis_db):
+    _engineer(coriolis_db, "Felicity Farseer", "Unlocked", 5)
+    for name in ("Chemical Distillery", "Eccentric Hyperspace Trajectories", "Manganese", "Arsenic", "Chemical Manipulators", "Datamined Wake Exceptions"):
+        _hold(coriolis_db, name.replace(" ", "").lower(), name, 20)
+    plan = qf.plan_upgrade("Frame Shift Drive", "Increased range", 5, from_grade=3)
+    assert all(row["short_by"] == 0 for row in plan["short"].values())
+    assert "You hold everything." in plan["summary"] and "short by" not in plan["summary"]
+
+
 def test_the_experimental_effect_is_added_once(coriolis_db):
     _engineer(coriolis_db, "Felicity Farseer", "Unlocked", 5)
     plan = qf.plan_upgrade("Frame Shift Drive", "Increased range", 5, from_grade=4, experimental_effect="Mass Manager")
     assert plan["found"] is True and plan["experimental"]["effect_name"] == "Mass Manager"
     assert plan["totals"]["Atypical Disrupted Wake Echoes"] == 5 and plan["totals"]["Galvanising Alloys"] == 3
     assert plan["totals"]["Arsenic"] == 5 and "Includes Mass Manager once" in plan["summary"]
+    # added ONCE, not per step and not instead of the steps: Eccentric Hyperspace Trajectories is in grade 4's roll and in the effect
+    wide = qf.plan_upgrade("Frame Shift Drive", "Increased range", 5, from_grade=3, experimental_effect="Mass Manager")
+    assert wide["totals"]["Eccentric Hyperspace Trajectories"] == 4 + 1 and wide["totals"]["Manganese"] == 4
 
 
 def test_an_effect_the_module_cannot_take_refuses_the_whole_plan(coriolis_db):
@@ -260,7 +341,32 @@ def test_what_is_held_reduces_what_is_short(coriolis_db):
 def test_a_module_already_at_the_target_has_nothing_to_collect(coriolis_db):
     plan = qf.plan_upgrade("Frame Shift Drive", "Increased range", 4, from_grade=4)
     assert plan["found"] is True and plan["steps"] == [] and plan["totals"] == {}
-    assert plan["summary"].startswith("Frame Shift Drive, Increased range: your module is already at grade 4")
+    # a grade the caller stated is reported as stated, not as a fact about the commander's ship
+    assert plan["summary"].startswith("Frame Shift Drive, Increased range: you said the module is at grade 4, so grade 4 is already there")
+
+
+def test_the_fitted_modules_own_grade_is_reported_as_fitted(coriolis_db):
+    _fit(coriolis_db, "FrameShiftDrive", FSD, "FSD_LongRange", 4)
+    plan = qf.plan_upgrade("Frame Shift Drive", "Increased range", 3)
+    assert plan["steps"] == [] and plan["start_source"] == "fitted module"
+    assert plan["summary"].startswith("Frame Shift Drive, Increased range: your fitted module is at grade 4, so grade 3 is already there")
+
+
+def test_already_there_with_an_experimental_effect_still_lists_the_effect_cost(coriolis_db):
+    plan = qf.plan_upgrade("Frame Shift Drive", "Increased range", 4, from_grade=4, experimental_effect="Mass Manager")
+    assert plan["steps"] == [] and plan["totals"]["Atypical Disrupted Wake Echoes"] == 5
+    assert "nothing to collect" not in plan["summary"]
+    assert "Mass Manager" in plan["summary"] and "You need 5 Atypical Disrupted Wake Echoes, 3 Galvanising Alloys, 1 Eccentric Hyperspace Trajectories." in plan["summary"]
+    assert "You are short by: 5 Atypical Disrupted Wake Echoes (have 0)" in plan["summary"]
+
+
+def test_an_engineer_who_cannot_go_further_than_the_module_already_is_says_so(coriolis_db):
+    _engineer(coriolis_db, "Felicity Farseer", "Unlocked", 2)
+    _fit(coriolis_db, "FrameShiftDrive", FSD, "FSD_LongRange", 3)
+    plan = qf.plan_upgrade("Frame Shift Drive", "Increased range", 5)
+    assert plan["steps"] == [] and plan["totals"] == {} and plan["chosen_engineer"] == "Felicity Farseer"
+    assert "rank 2 cannot take a grade-3 module any further" in plan["summary"]
+    assert "stops at grade 2" not in plan["summary"]                       # the module is already past grade 2
 
 
 @pytest.mark.parametrize("target", ["five", None, 0, 6, "", []])

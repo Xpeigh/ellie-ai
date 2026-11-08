@@ -670,13 +670,16 @@ def _commander_engineers(conn):
             for r in conn.execute("SELECT engineer_name, rank_stage, rank_value FROM engineer_progress")}
 
 
-def _engineers_offering(conn, fdname, grade):
-    """The engineers Coriolis lists for this blueprint at this grade, each with the commander's status and
-    rank from the journal. One entry per engineer (Coriolis's misspellings merged), sorted by name.
+def _engineers_offering(conn, groups, fdname, grade):
+    """The engineers Coriolis lists for this blueprint at this grade ON THIS KIND OF MODULE (`groups` are the
+    module's resolved groups: the lists differ per group), each with the commander's status and rank from the
+    journal. One entry per engineer (Coriolis's misspellings merged), sorted by name.
     `usable` = unlocked with a rank of at least this grade."""
     mine = _commander_engineers(conn)
     seen, offers = set(), []
-    for row in conn.execute("SELECT DISTINCT engineer FROM blueprint_engineers WHERE fdname = ? AND grade = ?", (fdname, grade)):
+    for row in conn.execute(
+            f"SELECT DISTINCT engineer FROM blueprint_engineers WHERE grp IN ({_in_marks(groups)}) AND fdname = ? AND grade = ?",
+            (*groups, fdname, grade)):
         key = engineer_key(row["engineer"])
         if key in seen:
             continue
@@ -714,10 +717,12 @@ def _start_grade(conn, groups, fdname, stated):
         return stated, "stated", None
     fitted = []
     if groups:
+        # Armour ('bh') has no module_stats rows, so it is found by its slot instead of through the join.
+        armour = " OR m.slot = 'Armour'" if "bh" in groups else ""
         try:
             fitted = conn.execute(
                 "SELECT m.slot, m.engineering_blueprint, m.engineering_level FROM current_loadout_modules m "
-                f"JOIN module_stats s ON s.symbol = lower(m.item) WHERE s.grp IN ({_in_marks(groups)}) ORDER BY m.slot", groups).fetchall()
+                f"LEFT JOIN module_stats s ON s.symbol = lower(m.item) WHERE s.grp IN ({_in_marks(groups)}){armour} ORDER BY m.slot", groups).fetchall()
         except sqlite3.OperationalError as e:
             if "no such table" not in str(e):
                 raise
@@ -746,16 +751,38 @@ def _step_cost(conn, module_name, groups, upgrade_name, fdname, grade):
     return (cost["materials"], cost["extras"]) if cost else ({}, [])
 
 
+def _needs_parts(plan):
+    """The 'You need ...' and 'You are short by ...' sentences, from the plan's own totals and shortfall."""
+    parts = []
+    if plan["totals"]:
+        parts.append("You need " + ", ".join(f"{qty} {name}" for name, qty in plan["totals"].items()) + ".")
+        lacking = [(name, row) for name, row in plan["short"].items() if row["short_by"] > 0]
+        if lacking:
+            parts.append("You are short by: " + ", ".join(f"{row['short_by']} {name} (have {row['have']})" for name, row in lacking) + ".")
+        else:
+            parts.append("You hold everything.")
+    return parts
+
+
 def _plan_summary(plan, chosen, mode, offers):
     """The short paragraph a 2-4B model reads out. Every figure in it is in the plan's own fields."""
     module, upgrade, target, start = plan["module"], plan["upgrade"], plan["target_grade"], plan["from_grade"]
     if start >= target:
-        return f"{module}, {upgrade}: your module is already at grade {start}, so there is nothing to collect for grade {target}."
+        # A grade the caller stated is reported as stated; only a fitted module's grade is a fact about the ship.
+        known = f"your fitted module is at grade {start}" if plan["start_source"] == "fitted module" else f"you said the module is at grade {start}"
+        parts = [f"{module}, {upgrade}: {known}, so grade {target} is already there and no rolls are needed."]
+        if plan["experimental"]:
+            parts.append(f"{plan['experimental']['effect_name']} would still be applied once.")
+            parts.extend(_needs_parts(plan))
+        return " ".join(parts)
     where = {"fitted module": f"your fitted module is at grade {start}", "stated": f"from grade {start}"}.get(
         plan["start_source"], "from an unengineered module")
     parts = [f"{module}, {upgrade}, grade {start} to {target} ({where})."]
     if mode == "usable":
         parts.append(f"{chosen['name']} (unlocked, rank {chosen['rank']}) can do it.")
+    elif mode == "low_rank" and start >= chosen["rank"]:
+        parts.append(f"{chosen['name']} (unlocked, rank {chosen['rank']}) is the best you have, but rank {chosen['rank']} cannot take a "
+                     f"grade-{start} module any further: grade {start + 1} needs rank {start + 1}.")
     elif mode == "low_rank":
         parts.append(f"{chosen['name']} (unlocked, rank {chosen['rank']}) is the best you have, but grade {target} needs rank {target}, "
                      f"so this plan stops at grade {chosen['rank']}.")
@@ -768,13 +795,7 @@ def _plan_summary(plan, chosen, mode, offers):
         parts.append(f"No engineer in Coriolis's data offers it at grade {target}.")
     if plan["steps"]:
         parts.append(f"Rolls at {plan['rolls_basis']}: " + ", ".join(f"grade {s['grade']}: {s['rolls']}" for s in plan["steps"]) + ".")
-    if plan["totals"]:
-        parts.append("You need " + ", ".join(f"{qty} {name}" for name, qty in plan["totals"].items()) + ".")
-        lacking = [(name, row) for name, row in plan["short"].items() if row["short_by"] > 0]
-        if lacking:
-            parts.append("You are short by: " + ", ".join(f"{row['short_by']} {name} (have {row['have']})" for name, row in lacking) + ".")
-        else:
-            parts.append("You hold everything.")
+    parts.extend(_needs_parts(plan))
     parts.extend(plan["notes"])
     parts.append("Extra rolls for a better result will cost more.")
     return " ".join(parts)
@@ -817,7 +838,7 @@ def plan_upgrade(module_name: str, upgrade_name: str, target_grade: int, from_gr
                     "reason": f"{resolved['upgrade_name']} for {module_name} is offered at grade{plural} {_grade_span(grades)}, not grade {target}."}
 
         start, start_source, start_note = _start_grade(conn, groups, fdname, stated)
-        offers = _engineers_offering(conn, fdname, target)
+        offers = _engineers_offering(conn, groups, fdname, target)
         chosen, mode = _choose_engineer(offers, target)
         # A usable or lower-ranked engineer sets the rank. With nobody unlocked, or no rank known yet, assume
         # the rank-5 engineer one will need (and the summary says so); never a crash on a missing rank.

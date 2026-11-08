@@ -391,6 +391,27 @@ def test_blueprint_engineers_list_who_offers_what_at_each_grade(tmp_path):
     assert "Felicty Farseer" in engineers("Engine_Dirty", 3)          # Coriolis's own misspelling is stored as published
 
 
+def test_blueprint_engineers_keep_the_module_group(tmp_path):
+    conn = _fresh_db(tmp_path)
+    ism.build_blueprint_engineers(conn, str(REPO))
+    conn.commit()
+
+    def engineers(grp, fdname, grade):
+        return {r[0] for r in conn.execute(
+            "SELECT engineer FROM blueprint_engineers WHERE grp = ? AND fdname = ? AND grade = ?", (grp, fdname, grade))}
+
+    assert engineers("pl", "Weapon_LongRange", 5) == {"Broo Tarquin", "Mel Brandon"}
+    assert engineers("mc", "Weapon_LongRange", 5) == {"Marsha Hicks", 'Tod "The Blaster" McQuinn'}      # as Coriolis spells it
+    assert engineers("ch", "Misc_LightWeight", 3) == {"Petra Olmanova", "Ram Tah"}
+
+
+def test_an_older_three_column_engineer_table_is_replaced_by_the_schema_build(tmp_path):
+    conn = sqlite3.connect(str(tmp_path / "old.db"))
+    conn.execute("CREATE TABLE blueprint_engineers (fdname TEXT, grade INTEGER, engineer TEXT)")
+    ism.build_schema(conn)
+    assert [r[1] for r in conn.execute("PRAGMA table_info(blueprint_engineers)")] == ["grp", "fdname", "grade", "engineer"]
+
+
 def test_ingest_all_fills_the_engineer_table_and_a_rerun_does_not_duplicate(tmp_path):
     conn = sqlite3.connect(str(tmp_path / "engineers.db"))
     ism.ingest_all(conn, str(REPO))

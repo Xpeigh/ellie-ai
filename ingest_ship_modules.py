@@ -98,10 +98,13 @@ def build_schema(conn, commit=True):
         )
         """
     )
+    # Rebuilt on every ingest, so DROP+CREATE: it also replaces the first version of this table, which had no
+    # `grp` column and so merged the engineer lists of different module groups.
+    conn.execute("DROP TABLE IF EXISTS blueprint_engineers")
     conn.execute(
         """
-        CREATE TABLE IF NOT EXISTS blueprint_engineers (
-            fdname TEXT, grade INTEGER, engineer TEXT, PRIMARY KEY (fdname, grade, engineer)
+        CREATE TABLE blueprint_engineers (
+            grp TEXT, fdname TEXT, grade INTEGER, engineer TEXT, PRIMARY KEY (grp, fdname, grade, engineer)
         )
         """
     )
@@ -296,18 +299,20 @@ def build_module_specials(conn, repo_path, commit=True, corrections=None):
 
 
 def build_blueprint_engineers(conn, repo_path, commit=True):
-    """Which engineers offer each blueprint at each grade, from modifications/modules.json (the same
-    file as the allow-lists). Names are stored exactly as Coriolis spells them -- including its own
-    misspellings, which the lookups correct -- so the table mirrors the source. Clears and rebuilds."""
+    """Which engineers offer each blueprint at each grade FOR EACH MODULE GROUP, from modifications/modules.json
+    (the same file as the allow-lists). The group matters: Weapon_LongRange is Broo Tarquin and Mel Brandon for a
+    pulse laser but Tod McQuinn and Marsha Hicks for a multi-cannon. Names are stored exactly as Coriolis spells
+    them -- including its own misspellings, which the lookups correct -- so the table mirrors the source.
+    Clears and rebuilds."""
     data = json.load(open(Path(repo_path) / "modifications" / "modules.json", encoding="utf-8"))
     conn.execute("DELETE FROM blueprint_engineers")
     count = 0
-    for entry in data.values():
+    for grp, entry in data.items():
         for fdname, blueprint in (entry.get("blueprints") or {}).items():
             for grade, detail in blueprint.get("grades", {}).items():
                 for engineer in detail.get("engineers", []):
-                    count += conn.execute("INSERT OR IGNORE INTO blueprint_engineers VALUES (?,?,?)",
-                                          (fdname, int(grade), engineer)).rowcount
+                    count += conn.execute("INSERT OR IGNORE INTO blueprint_engineers VALUES (?,?,?,?)",
+                                          (grp, fdname, int(grade), engineer)).rowcount
     if commit:
         conn.commit()
     return count

@@ -60,6 +60,14 @@ def test_a_craft_with_no_known_rank_is_skipped(tmp_path):
     assert _segments(tmp_path, *lines) == []
 
 
+def test_the_startup_engineers_list_gives_each_unlocked_engineers_rank(tmp_path):
+    startup = json.dumps({"event": "EngineerProgress", "Engineers": [
+        {"Engineer": "Felicity Farseer", "Progress": "Unlocked", "Rank": 5},
+        {"Engineer": "Mel Brandon", "Progress": "Known"}]})                      # Known: no Rank key at all
+    lines = [startup] + [_craft("Felicity Farseer", "m1", "FSD_LongRange", g) for g in (1, 2, 2)]
+    assert _segments(tmp_path, *lines) == [{"rank5": True, "grade": 1, "rolls": 1}]
+
+
 def test_build_table_makes_rank_5_a_rule_and_below_5_the_most_common_value():
     segments = ([{"rank5": True, "grade": 1, "rolls": 1}] * 3 + [{"rank5": True, "grade": 3, "rolls": 2}]
                 + [{"rank5": False, "grade": 1, "rolls": r} for r in (3, 4, 4, 4, 5)]
@@ -84,6 +92,11 @@ def test_only_observed_entries_can_be_thin():
     assert er.is_thin({"source": "observed", "samples": 4, "share": 1.0}) is True        # too few
     assert er.is_thin({"source": "observed", "samples": 9, "share": 0.56}) is True       # varies too much
     assert er.is_thin({"source": "observed", "samples": 7, "share": 1.0}) is False
+
+
+def test_thin_boundaries_are_inclusive_of_the_good_side():
+    assert er.is_thin({"source": "observed", "samples": 5, "share": 0.75}) is False        # exactly 5 samples, exactly 3 in 4
+    assert er.is_thin({"source": "observed", "samples": 5, "share": 0.74}) is True
 
 
 def test_rolls_for_picks_the_rank_table_and_has_no_grade_5_below_rank_5():
