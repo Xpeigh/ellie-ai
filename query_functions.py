@@ -20,6 +20,7 @@ from pathlib import Path
 
 from blueprint_mapping import (BLUEPRINT_ALIASES, ENGINEER_ALIASES, GENERIC_EXTRA_WORDS, GROUP_SYNONYMS,
                                clean_material_name, engineer_key, name_tokens, squash)
+from engineering_rolls import load_rolls, rolls_for
 from loadout_calc import compute_jump_range, compute_current_jump_range, apply_blueprint_delta
 
 DB_PATH = str(Path(__file__).resolve().parent / "elite-dangerous.db")
@@ -733,6 +734,148 @@ def _start_grade(conn, groups, fdname, stated):
     if row["engineering_blueprint"]:
         return 0, "from scratch", "Your fitted one carries a different modification; a new one replaces it, so this starts from grade 1."
     return 0, "fitted module", "Your fitted one is unengineered, so this starts from grade 1."
+
+
+def _step_cost(conn, module_name, groups, upgrade_name, fdname, grade):
+    """({material: qty}, [extras]) for ONE roll at this grade: the spreadsheet's row first (as in
+    get_blueprint), otherwise Coriolis's; ({}, []) when neither records anything."""
+    sheet = _sheet_blueprint(conn, module_name, groups, upgrade_name, grade)
+    if sheet is not None:
+        return _split_materials(sheet["materials_json"])
+    cost = _coriolis_cost(conn, fdname, grade)
+    return (cost["materials"], cost["extras"]) if cost else ({}, [])
+
+
+def _plan_summary(plan, chosen, mode, offers):
+    """The short paragraph a 2-4B model reads out. Every figure in it is in the plan's own fields."""
+    module, upgrade, target, start = plan["module"], plan["upgrade"], plan["target_grade"], plan["from_grade"]
+    if start >= target:
+        return f"{module}, {upgrade}: your module is already at grade {start}, so there is nothing to collect for grade {target}."
+    where = {"fitted module": f"your fitted module is at grade {start}", "stated": f"from grade {start}"}.get(
+        plan["start_source"], "from an unengineered module")
+    parts = [f"{module}, {upgrade}, grade {start} to {target} ({where})."]
+    if mode == "usable":
+        parts.append(f"{chosen['name']} (unlocked, rank {chosen['rank']}) can do it.")
+    elif mode == "low_rank":
+        parts.append(f"{chosen['name']} (unlocked, rank {chosen['rank']}) is the best you have, but grade {target} needs rank {target}, "
+                     f"so this plan stops at grade {chosen['rank']}.")
+    elif mode == "rank_unknown":
+        parts.append(f"The journal has not shown {chosen['name']}'s rank yet, so the rolls below assume a rank-5 engineer.")
+    elif mode == "none_unlocked":
+        listed = ", ".join(f"{o['name']} ({o['status']})" for o in offers)
+        parts.append(f"None of the engineers who offer it is unlocked yet: {listed}. The rolls below assume a rank-5 engineer.")
+    else:
+        parts.append(f"No engineer in Coriolis's data offers it at grade {target}.")
+    if plan["steps"]:
+        parts.append(f"Rolls at {plan['rolls_basis']}: " + ", ".join(f"grade {s['grade']}: {s['rolls']}" for s in plan["steps"]) + ".")
+    if plan["totals"]:
+        parts.append("You need " + ", ".join(f"{qty} {name}" for name, qty in plan["totals"].items()) + ".")
+        lacking = [(name, row) for name, row in plan["short"].items() if row["short_by"] > 0]
+        if lacking:
+            parts.append("You are short by: " + ", ".join(f"{row['short_by']} {name} (have {row['have']})" for name, row in lacking) + ".")
+        else:
+            parts.append("You hold everything.")
+    parts.extend(plan["notes"])
+    parts.append("Extra rolls for a better result will cost more.")
+    return " ".join(parts)
+
+
+@_needs_setup
+def plan_upgrade(module_name: str, upgrade_name: str, target_grade: int, from_grade: int = None, experimental_effect: str = None) -> dict:
+    """Plan an engineering upgrade of ONE module up to a grade: rolls per grade, the materials for them, what
+    is held and short, and which engineers can do it. Part one's per-roll costs times the rolls in
+    engineering_rolls.json (N rolls for grade N at an engineer of rank 5, about 4 below), for the grades
+    between the starting grade and the target. The starting grade is the fitted module's own when it can
+    be known, else an unengineered module; every limit is stated, nothing is guessed."""
+    module_name = str(module_name or "").strip()
+    upgrade_name = str(upgrade_name or "").strip()
+    target = _grade_number(target_grade)
+    base = {"module": module_name, "upgrade": upgrade_name, "target_grade": target if target is not None else target_grade}
+    if target is None or not 1 <= target <= 5:
+        return {"found": False, **base, "reason": "The target grade must be a number from 1 to 5."}
+    stated = None
+    if from_grade not in (None, ""):
+        stated = _grade_number(from_grade)
+        if stated is None or not 0 <= stated <= 4:
+            return {"found": False, **base, "reason": "The starting grade must be a number from 0 to 4."}
+    effect = None
+    if experimental_effect not in (None, ""):
+        effect = get_experimental_effect(module_name, str(experimental_effect))
+        if not effect["found"]:
+            return {"found": False, **base, "reason": effect["reason"]}
+
+    conn = _connect()
+    try:
+        groups = _resolve_module_groups(conn, module_name)
+        resolved, miss = _resolve_blueprint(conn, module_name, upgrade_name, groups)
+        if miss:
+            return {"found": False, **base, **miss}
+        fdname, grades = resolved["fdname"], resolved["grades"]
+        if target not in grades:
+            plural = "s" if len(grades) > 1 else ""
+            return {"found": False, **base, "available_grades": grades,
+                    "reason": f"{resolved['upgrade_name']} for {module_name} is offered at grade{plural} {_grade_span(grades)}, not grade {target}."}
+
+        start, start_source, start_note = _start_grade(conn, groups, fdname, stated)
+        offers = _engineers_offering(conn, fdname, target)
+        chosen, mode = _choose_engineer(offers, target)
+        # A usable or lower-ranked engineer sets the rank. With nobody unlocked, or no rank known yet, assume
+        # the rank-5 engineer one will need (and the summary says so); never a crash on a missing rank.
+        rank = chosen["rank"] if mode in ("usable", "low_rank") else 5
+        reach = min(target, rank)
+        rank5 = rank == 5
+        table = load_rolls()
+
+        steps, notes, totals, totals_up = [], [], {}, {}
+        if start_note:
+            notes.append(start_note)
+        thin = False
+        for grade in range(start + 1, reach + 1):
+            if grade not in grades:
+                continue
+            entry = rolls_for(table, rank5, grade)
+            if entry is None:
+                notes.append(f"There is no rolls figure for grade {grade} at this rank, so it is left out.")
+                continue
+            materials, extras = _step_cost(conn, module_name, groups, upgrade_name, fdname, grade)
+            known = bool(materials or extras)
+            steps.append({"grade": grade, "rolls": entry["typical"], "rolls_up_to": entry["up_to"],
+                          "per_roll": materials, "cost_known": known})
+            if entry["thin"]:
+                thin = True
+                notes.append(f"Grade {grade} rolls below rank 5 vary (up to {entry['up_to']}); {entry['typical']} is the usual number.")
+            if known:
+                for name, qty in materials.items():
+                    totals[name] = totals.get(name, 0) + qty * entry["typical"]
+                    totals_up[name] = totals_up.get(name, 0) + qty * entry["up_to"]
+            else:
+                notes.append(f"Grade {grade} has no recorded materials, so it is left out of the totals.")
+        if not steps and start < reach:
+            notes.append("Nothing more can be planned with this engineer at your module's current grade.")
+
+        experimental = None
+        if effect:
+            experimental = {"effect_name": effect["effect_name"], "materials": effect["materials"]}
+            for name, qty in effect["materials"].items():
+                totals[name] = totals.get(name, 0) + qty
+                totals_up[name] = totals_up.get(name, 0) + qty
+            notes.append(f"Includes {effect['effect_name']} once ({_materials_text(effect['materials'], [])}).")
+
+        short = {}
+        for name, need in totals.items():
+            held = _held_count(conn, name)
+            have = held["count"] if held else 0
+            short[name] = {"need": need, "need_up_to": totals_up[name], "have": have, "short_by": max(0, need - have)}
+
+        plan = {"found": True, **base, "upgrade": resolved["upgrade_name"], "from_grade": start, "start_source": start_source,
+                "rolls_basis": "rank 5" if rank5 else "below rank 5", "steps": steps, "totals": totals,
+                "totals_up_to": totals_up, "short": short, "engineers": offers,
+                "chosen_engineer": chosen["name"] if chosen else None, "thin_evidence": thin, "notes": notes,
+                "experimental": experimental}
+        plan["summary"] = _plan_summary(plan, chosen, mode, offers)
+        return plan
+    finally:
+        conn.close()
 
 
 @_needs_setup
