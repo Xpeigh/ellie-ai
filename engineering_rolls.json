@@ -1,0 +1,65 @@
+{
+ "basis": "Observed in 246 engineering crafts from one commander's journal, read on 2026-11-08. The rank-5 figures are the game's rule (grade N takes N rolls), confirmed by the commander; the below-rank-5 figures are the most common value seen.",
+ "rank5": {
+  "1": {
+   "typical": 1,
+   "up_to": 1,
+   "samples": 6,
+   "source": "rule"
+  },
+  "2": {
+   "typical": 2,
+   "up_to": 2,
+   "samples": 6,
+   "source": "rule"
+  },
+  "3": {
+   "typical": 3,
+   "up_to": 3,
+   "samples": 5,
+   "source": "rule"
+  },
+  "4": {
+   "typical": 4,
+   "up_to": 4,
+   "samples": 5,
+   "source": "rule"
+  },
+  "5": {
+   "typical": 5,
+   "up_to": 5,
+   "samples": 11,
+   "source": "rule"
+  }
+ },
+ "below5": {
+  "1": {
+   "typical": 4,
+   "up_to": 5,
+   "samples": 9,
+   "source": "observed",
+   "share": 0.56
+  },
+  "2": {
+   "typical": 4,
+   "up_to": 4,
+   "samples": 7,
+   "source": "observed",
+   "share": 1.0
+  },
+  "3": {
+   "typical": 4,
+   "up_to": 4,
+   "samples": 6,
+   "source": "observed",
+   "share": 1.0
+  },
+  "4": {
+   "typical": 4,
+   "up_to": 4,
+   "samples": 6,
+   "source": "observed",
+   "share": 1.0
+  }
+ }
+}
