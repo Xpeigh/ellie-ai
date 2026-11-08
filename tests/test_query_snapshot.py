@@ -108,6 +108,7 @@ TOOL_CALLS = {
     "get_ship_info (unknown ship)": lambda: qf.get_ship_info("No Such Ship"),
     "simulate_module_swap": lambda: qf.simulate_module_swap("life support", 5, "D"),
     "simulate_module_swap (refused)": lambda: qf.simulate_module_swap("frame shift drive", 1, "A"),
+    "plan_upgrade": lambda: qf.plan_upgrade("Beam Laser", "Efficient", 3),
 }
 
 

@@ -16,11 +16,12 @@ model only does two things: pick one of a handful of read-only functions, and ph
 Elite journal ──► journal_watcher.py ─┐
 Engineers.xlsx ─► ingest_excel.py ────┤
 Coriolis data ──► ingest_coriolis.py ─┼─► elite-dangerous.db ──► query_functions.py ──► ellie_chat.py ◄─► Ollama
-EDSM dumps ─────► ingest_edsm.py ─────┘      (SQLite)             (the 7 tools)         (chat loop)
+EDSM dumps ─────► ingest_edsm.py ─────┘      (SQLite)             (the 11 tools)        (chat loop)
 ```
 
-The tools: `get_blueprint`, `get_experimental_effect`, `missing_materials`, `get_engineer`,
-`get_material_count`, `player_state`, `distance_to_system`. Your materials, ranks, ship and location
+The tools: `get_blueprint`, `get_experimental_effect`, `missing_materials`, `plan_upgrade`, `get_engineer`,
+`get_material_count`, `player_state`, `distance_to_system`, and for your ship `get_current_loadout`,
+`get_ship_info` and `simulate_module_swap`. Your materials, ranks, ship and location
 are read from the game's own journal files, so nothing is sent anywhere and no account is needed.
 
 ## Requirements
