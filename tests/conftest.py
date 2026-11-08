@@ -23,6 +23,7 @@ NEEDS_CORIOLIS_DATA = {
     "test_blueprint_lookup.py",
     "test_cross_check.py",
     "test_verify_blueprints.py",
+    "test_plan_upgrade.py",
 }
 
 

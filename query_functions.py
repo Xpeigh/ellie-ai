@@ -18,8 +18,8 @@ import re
 import sqlite3
 from pathlib import Path
 
-from blueprint_mapping import (BLUEPRINT_ALIASES, GENERIC_EXTRA_WORDS, GROUP_SYNONYMS, clean_material_name,
-                               name_tokens, squash)
+from blueprint_mapping import (BLUEPRINT_ALIASES, ENGINEER_ALIASES, GENERIC_EXTRA_WORDS, GROUP_SYNONYMS,
+                               clean_material_name, engineer_key, name_tokens, squash)
 from loadout_calc import compute_jump_range, compute_current_jump_range, apply_blueprint_delta
 
 DB_PATH = str(Path(__file__).resolve().parent / "elite-dangerous.db")
@@ -651,6 +651,48 @@ def _held_count(conn, name):
         "ORDER BY (material_name = ?) DESC LIMIT 1",
         (key, key, key),
     ).fetchone()
+
+
+def _commander_engineers(conn):
+    """{engineer_key: {"name", "stage", "rank"}} from the journal-fed engineer_progress table ({} when empty)."""
+    return {engineer_key(r["engineer_name"]): {"name": r["engineer_name"], "stage": r["rank_stage"], "rank": r["rank_value"]}
+            for r in conn.execute("SELECT engineer_name, rank_stage, rank_value FROM engineer_progress")}
+
+
+def _engineers_offering(conn, fdname, grade):
+    """The engineers Coriolis lists for this blueprint at this grade, each with the commander's status and
+    rank from the journal. One entry per engineer (Coriolis's misspellings merged), sorted by name.
+    `usable` = unlocked with a rank of at least this grade."""
+    mine = _commander_engineers(conn)
+    seen, offers = set(), []
+    for row in conn.execute("SELECT DISTINCT engineer FROM blueprint_engineers WHERE fdname = ? AND grade = ?", (fdname, grade)):
+        key = engineer_key(row["engineer"])
+        if key in seen:
+            continue
+        seen.add(key)
+        known = mine.get(key)
+        status = (known["stage"] or "").lower() if known else "not met"
+        rank = known["rank"] if known else None
+        name = known["name"] if known else ENGINEER_ALIASES.get(squash(row["engineer"]), row["engineer"])
+        offers.append({"name": name, "status": status, "rank": rank, "usable": status == "unlocked" and (rank or 0) >= grade})
+    return sorted(offers, key=lambda o: o["name"])
+
+
+def _choose_engineer(offers, target):
+    """(engineer, mode): the usable engineer with the highest rank (ties by name) -> 'usable'; else the unlocked
+    one with the highest known rank, who cannot reach the target -> 'low_rank'; else an unlocked one whose rank
+    the journal has not given -> 'rank_unknown'; else None with 'none_unlocked' (offers exist, nobody is
+    unlocked) or 'no_engineer' (nobody offers it)."""
+    usable = sorted((o for o in offers if o["usable"]), key=lambda o: (-o["rank"], o["name"]))
+    if usable:
+        return usable[0], "usable"
+    unlocked = [o for o in offers if o["status"] == "unlocked"]
+    ranked = sorted((o for o in unlocked if o["rank"] is not None), key=lambda o: (-o["rank"], o["name"]))
+    if ranked:
+        return ranked[0], "low_rank"
+    if unlocked:
+        return sorted(unlocked, key=lambda o: o["name"])[0], "rank_unknown"
+    return None, ("none_unlocked" if offers else "no_engineer")
 
 
 @_needs_setup

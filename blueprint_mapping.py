@@ -81,3 +81,17 @@ def load_corrections(path=None):
 # to the module being asked about, otherwise the match is refused: "Engine Focused" is not "Focused" for a laser.
 GENERIC_EXTRA_WORDS = frozenset({"weapon", "weapons", "mount", "modification", "tuning", "drive", "drives",
                                  "magazine", "upgrade", "blueprint"})
+
+
+# Engineer names that Coriolis (or the owner's sheet) misspells, keyed by squash(): the journal's spelling wins.
+ENGINEER_ALIASES = {
+    "felictyfarseer": "Felicity Farseer",
+    "colonerbrisdekker": "Colonel Bris Dekker",
+}
+
+
+def engineer_key(name):
+    """A comparison key for an engineer's name: case, spaces and punctuation ignored, known misspellings
+    corrected ('Felicty Farseer' and 'Felicity Farseer' give the same key)."""
+    key = squash(name)
+    return squash(ENGINEER_ALIASES.get(key, name))

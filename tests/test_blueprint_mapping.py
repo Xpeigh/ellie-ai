@@ -48,3 +48,11 @@ def test_the_synonym_and_alias_tables_are_well_formed():
     assert bm.GROUP_SYNONYMS["armour"] == "bh" and bm.GROUP_SYNONYMS["fsd"] == "fsd"
     for fdname, aliases in bm.BLUEPRINT_ALIASES.items():
         assert "_" in fdname and isinstance(aliases, tuple) and aliases
+
+
+def test_engineer_key_ignores_spelling_noise_and_corrects_the_known_misspellings():
+    assert bm.engineer_key("Felicty Farseer") == bm.engineer_key("Felicity Farseer") == "felicityfarseer"
+    assert bm.engineer_key("Coloner Bris Dekker") == bm.engineer_key("Colonel Bris Dekker")
+    assert bm.engineer_key("Tod 'The Blaster' McQuinn") == bm.engineer_key('Tod "The Blaster" McQuinn')
+    assert bm.engineer_key("  elvira   MARTUUK ") == "elviramartuuk"
+    assert bm.engineer_key(None) == "" and bm.engineer_key("") == ""
