@@ -26,7 +26,7 @@ Read-only queries on the owner's journals (574 files, 257 `EngineerCraft` events
 
 | # | Finding | Evidence |
 |---|---|---|
-| F1 | **Rolls per grade depend on the engineer's rank.** At rank 5, grade N takes N rolls. Below rank 5, grades 1 to 4 took about 4 rolls each. | Finished grades (a higher grade followed), grouped by the engineer's rank at the time (tracked from `EngineerProgress` events). Rank 5: grade 1: 1 roll (6 of 6), grade 2: 2 (6 of 6), grade 3: 3 (4 of 5, once 2), grade 4: 4 (4 of 5, once 2). Below rank 5: grade 1: 4 (5 of 9; also 3 and 5), grade 2: 4 (7 of 7), grade 3: 4 (6 of 6), grade 4: 4 (6 of 6). The owner's own rule ("n+2, grade 1 = 4" below rank 5) fits grades 1 and 2 and over-counts grades 3 and 4 (5 and 6 against 4 observed). Grade 5 appears only as the last step of a run and was 5 rolls in 5 of the 6 runs that reached it (one stopped after 3). |
+| F1 | **Rolls per grade depend on the engineer's rank.** At rank 5, grade N takes N rolls. Below rank 5, grades 1 to 4 took about 4 rolls each. | Finished grades (a higher grade followed), grouped by the engineer's rank at the time (tracked from `EngineerProgress` events). Rank 5: grade 1: 1 roll (6 of 6), grade 2: 2 (6 of 6), grade 3: 3 (4 of 5, once 2), grade 4: 4 (4 of 5, once 2). Below rank 5: grade 1: 4 (5 of 9; also 3 and 5), grade 2: 4 (7 of 7), grade 3: 4 (6 of 6), grade 4: 4 (6 of 6). The owner's own rule ("n+2, grade 1 = 4" below rank 5) fits grades 1 and 2 and over-counts grades 3 and 4 (5 and 6 against 4 observed). Grade 5 appears only as the last step of a run and was 5 rolls in 5 of the 6 runs that reached it (one stopped after 3). **The owner confirms the rank-5 rule for every grade, grade 5 included: an engineer at rank 5 makes every upgrade N rolls for grade N.** The below-rank-5 figures are observation only. |
 | F2 | **A grade is only ever crafted at or below the engineer's rank.** | 246 of 246 grade crafts with a known rank had grade <= rank. |
 | F3 | **The rank is in the journal.** | `engineer_progress` holds the stage (Known, Invited, Unlocked) and, once unlocked, the rank 1-5. The owner has 6 of 19 known engineers unlocked. |
 | F4 | **Coriolis lists the engineers per blueprint per grade.** 26 ship-module engineers. For all 179 blueprints that have both a grade 1 and a grade 5, at least one engineer offers both, so one engineer can carry a whole path. Of the 180 blueprints that reach grade 5, 179 have an engineer at grade 5 (142 have two, 18 three, 10 six and 9 one); `CargoRack_IncreasedCapacity` grade 5 has none. | `modifications/modules.json`. |
@@ -74,11 +74,11 @@ Rolls per step come from `engineering_rolls.json`, a data file in the repository
 ```json
 // abridged: the shipped file has every grade
 {"basis": "one commander's journal, with the date and the number of crafts counted",
- "rank5":  {"1": {"typical": 1, "up_to": 1, "samples": 6}, "2": {"typical": 2, "up_to": 2, "samples": 6}},
- "below5": {"1": {"typical": 4, "up_to": 5, "samples": 9}, "2": {"typical": 4, "up_to": 4, "samples": 7}}}
+ "rank5":  {"1": {"typical": 1, "up_to": 1, "samples": 6, "source": "rule"}, "2": {"typical": 2, "up_to": 2, "samples": 6, "source": "rule"}},
+ "below5": {"1": {"typical": 4, "up_to": 5, "samples": 9, "source": "observed"}, "2": {"typical": 4, "up_to": 4, "samples": 7, "source": "observed"}}}
 ```
 
-`typical` is the most common number of rolls seen for that grade, `up_to` the largest, `samples` how many finished grades support it. A grade with fewer than 5 samples is flagged as thin evidence in the reply. There is no `below5` entry for grade 5, because the journal shows no grade above the engineer's rank (F2).
+`typical` is the number of rolls the plan uses, `up_to` the largest number seen, `samples` how many finished grades support it, and `source` says where `typical` comes from: `"rule"` for the `rank5` entries (N rolls for grade N, confirmed by the owner and matching the journal) or `"observed"` for the `below5` entries (the most common value seen). Only an `observed` entry with fewer than 5 samples, or whose typical value covers fewer than 3 in 4 of its samples, is flagged as thin evidence in the reply (today that is grade 1 below rank 5, seen as 3, 4 or 5 rolls). There is no `below5` entry for grade 5, because the journal shows no grade above the engineer's rank (F2).
 
 The rank used is that of the chosen engineer (6.4), taken as constant over the plan. Players who roll extra for a better result will use more than `typical`; the reply says so.
 
@@ -112,7 +112,7 @@ The `summary` is a short paragraph the 2-4B model can read out. Format example u
 | Engineers offer it but none is unlocked | Lists them with status; plan computed at rank 5 numbers; "none of them is unlocked yet" |
 | The best unlocked engineer's rank is below the target | "Felicity is rank 3; grade 4 needs rank 4 or 5" and the materials for the steps up to their rank are still listed |
 | A step has no recorded cost | That step is marked cost unknown and left out of the totals, with a note |
-| Rolls entry is thin | `thin_evidence` true and a sentence saying how few crafts support it |
+| An `observed` rolls entry is thin | `thin_evidence` true and a sentence saying how few crafts support it or how much they vary |
 | No loadout, or several fitted modules | Start from 0 and say what to do (6.2) |
 
 ### 6.9 Tool description for the model
@@ -122,7 +122,7 @@ Short, no category words (part 1's benchmark showed small models copy them): "Pl
 ## 7. Testing and quality gate
 
 - **Maths.** Totals equal the sum of the steps for every blueprint and every start/target pair in Coriolis (the reachability pattern from part 1, run through `plan_upgrade`).
-- **Rolls.** Rank 5 versus below 5; rolls file shape; a thin entry is flagged; `rolls_from_journal.py` reproduces the shipped table from a committed fixture of runs (`tests/fixtures/observed_rolls.json`, game facts only).
+- **Rolls.** Rank 5 versus below 5 (rank 5 is N rolls for grade N, grade 5 included); rolls file shape and `source`; an observed entry is flagged when thin and a rule entry never is; `rolls_from_journal.py` reproduces the shipped table from a committed fixture of runs (`tests/fixtures/observed_rolls.json`, game facts only).
 - **Starting grade.** Each rule in 6.2 with a loadout fixture (fitted and engineered, fitted with different engineering, several fitted, none), plus `from_grade`.
 - **Engineers.** Status and rank mapping, usable versus not, the chosen engineer, the alias table, every Coriolis engineer resolving to a journal name.
 - **Limits.** One test per row of 6.8.
@@ -133,7 +133,7 @@ Short, no category words (part 1's benchmark showed small models copy them): "Pl
 
 ## 8. Risks and open decisions
 
-1. **The rolls table is one commander's data.** It is labelled as such, flagged where thin (grade 5), regenerable from any journal, and improvable by sharing results. If the community shows a different pattern, the file changes, not the code.
+1. **The below-rank-5 rolls are one commander's observations.** The rank-5 rule is confirmed; the rest is labelled as observed, flagged where it varies (grade 1), regenerable from any journal, and improvable by sharing results. If the community shows a different pattern, the file changes, not the code.
 2. **Rank changes during a plan.** Engineers rank up as you craft with them; the plan uses the current rank for every step and says so. Treated as a stated simplification.
 3. **Extra rolls.** The plan shows the usual number and "up to"; it cannot know how many extra the player will roll for quality.
 4. **Switching engineers mid-path** is allowed by the game but not modelled: one chosen engineer carries the whole path (F4 shows one always exists).
